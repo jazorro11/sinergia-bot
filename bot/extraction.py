@@ -6,11 +6,18 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from bot import config
+from bot import config, storage
 from bot.logger import get_logger
 from bot.prompts import EXTRACTION_PROMPT
 
 logger = get_logger(__name__)
+
+_MERGE_FROM_ROW_INSTRUCTION = """Registro previo del lead en el sistema (puede incluir datos de mensajes no incluidos en el historial abajo).
+Para cada campo del JSON de salida: si el cliente lo menciona en el historial, extrae solo de ahí; si no aparece en el historial pero tiene valor en el registro previo, usa ese valor; si no hay ninguna fuente, null.
+No inventes datos que no estén en el historial ni en el registro previo.
+
+Registro previo:
+"""
 
 
 class LeadRecord(BaseModel):
@@ -53,9 +60,33 @@ def _lead_record_json_schema_for_openai() -> dict[str, Any]:
     return schema
 
 
-def extract_lead_data(history: list[dict[str, Any]], chat_id: str | int) -> LeadRecord | None:
+def _merge_hint_from_lead_row(row: dict[str, Any] | None) -> str | None:
+    if not row:
+        return None
+    lines: list[str] = []
+    for k in storage.LEAD_DATA_KEYS:
+        v = row.get(k)
+        if v is None or str(v).strip() == "":
+            continue
+        lines.append(f"{k}: {str(v).strip()}")
+    if not lines:
+        return None
+    return _MERGE_FROM_ROW_INSTRUCTION + "\n".join(lines)
+
+
+def extract_lead_data(
+    history: list[dict[str, Any]],
+    chat_id: str | int,
+    *,
+    merge_from_lead_row: dict[str, Any] | None = None,
+) -> LeadRecord | None:
+    system_content = EXTRACTION_PROMPT
+    hint = _merge_hint_from_lead_row(merge_from_lead_row)
+    if hint:
+        system_content = f"{EXTRACTION_PROMPT}\n\n{hint}"
+
     messages: list[dict[str, str]] = [
-        {"role": "system", "content": EXTRACTION_PROMPT},
+        {"role": "system", "content": system_content},
         *_history_to_messages(history),
     ]
     cid = str(chat_id).strip()

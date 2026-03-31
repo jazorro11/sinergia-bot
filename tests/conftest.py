@@ -31,7 +31,7 @@ _DEFAULTS: dict[str, str] = {
     "CALENDLY_URL": "https://calendly.com/test/event",
     "LLM_MODEL": "gpt-4o",
     "LLM_EXTRACTION_MODEL": "gpt-4o-mini",
-    "EXTRACTION_FREQUENCY": "1",
+    "EXTRACTION_FREQUENCY": "2",
     "PORT": "8000",
     "LOG_LEVEL": "INFO",
 }

@@ -49,6 +49,39 @@ def test_extract_lead_data_partial_success(mock_create: MagicMock) -> None:
 
 
 @patch("bot.extraction.config.llm_extraction.chat.completions.create")
+def test_extract_lead_data_appends_merge_hint_when_lead_row_given(
+    mock_create: MagicMock,
+) -> None:
+    partial = {
+        "nombre": "Ana",
+        "ciudad": None,
+        "tipo_espacio": None,
+        "tipo_intervencion": None,
+        "area_aprox": None,
+        "situacion_actual": None,
+        "fecha_deseada": None,
+        "presupuesto": None,
+        "alcance": None,
+    }
+    mock_create.return_value = _mock_completion_json(json.dumps(partial))
+    row = {
+        "nombre": "Otros",
+        "ciudad": "Cali",
+        "tipo_espacio": None,
+        "tipo_intervencion": None,
+        "area_aprox": None,
+        "situacion_actual": None,
+        "fecha_deseada": None,
+        "presupuesto": None,
+        "alcance": None,
+    }
+    extract_lead_data([{"role": "user", "content": "Hola"}], 1, merge_from_lead_row=row)
+    sys_msg = mock_create.call_args.kwargs["messages"][0]["content"]
+    assert "Registro previo" in sys_msg
+    assert "ciudad: Cali" in sys_msg
+
+
+@patch("bot.extraction.config.llm_extraction.chat.completions.create")
 def test_extract_lead_data_failure_returns_none_and_logs_error(
     mock_create: MagicMock, caplog: pytest.LogCaptureFixture
 ) -> None:

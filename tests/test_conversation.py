@@ -198,6 +198,58 @@ def test_calendly_blocked_removes_agenda_aca_without_url(
     mock_mark_closed.assert_not_called()
 
 
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+@patch("bot.conversation.config.llm.chat.completions.create")
+def test_conversational_llm_respects_history_window(
+    mock_llm: MagicMock,
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    _save: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("bot.conversation.config.CONVERSATION_HISTORY_MAX_MESSAGES", 4)
+    mock_get_lead.return_value = None
+    long_hist = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": str(i)}
+        for i in range(20)
+    ]
+    mock_get_history.return_value = long_hist
+    mock_llm.return_value = _conv_completion("ok")
+    process_message(1, 1, "nuevo", 1, False)
+    msgs = mock_llm.call_args.kwargs["messages"]
+    assert msgs[0]["role"] == "system"
+    assert len(msgs) == 6
+    assert [m["content"] for m in msgs[1:-1]] == ["16", "17", "18", "19"]
+    assert msgs[-1] == {"role": "user", "content": "nuevo"}
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_post_calendly_farewell_sends_trimmed_history(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_llm: MagicMock,
+    _save: MagicMock,
+) -> None:
+    filler = [{"role": "user", "content": "old"}, {"role": "assistant", "content": "viejo"}] * 8
+    mock_get_lead.return_value = {"estado": "calendly_enviado", "chat_id": "1"}
+    mock_get_history.return_value = [
+        *filler,
+        {"role": "user", "content": "agendar"},
+        {"role": "assistant", "content": f"Link {config.CALENDLY_URL}"},
+    ]
+    mock_llm.return_value = _conv_completion("Hasta luego")
+    process_message(1, 1, "gracias", 100, False)
+    msgs = mock_llm.call_args.kwargs["messages"]
+    assert len(msgs) == 3
+    assert config.CALENDLY_URL in msgs[1]["content"]
+    assert msgs[2] == {"role": "user", "content": "gracias"}
+
+
 def test_remove_dangling_calendly_teasers_strips_known_tails() -> None:
     assert "agenda" not in _remove_dangling_calendly_teasers(
         "Diseño plus te puede servir. Cuando quieras agenda acá:"

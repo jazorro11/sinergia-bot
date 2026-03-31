@@ -39,7 +39,7 @@ def _parse_google_service_account_json(raw: str) -> dict:
 
 
 def _parse_extraction_frequency() -> int:
-    raw = os.environ.get("EXTRACTION_FREQUENCY", "1").strip()
+    raw = os.environ.get("EXTRACTION_FREQUENCY", "2").strip()
     try:
         n = int(raw)
     except ValueError:
@@ -47,6 +47,24 @@ def _parse_extraction_frequency() -> int:
         sys.exit(1)
     if n < 1:
         logger.critical("EXTRACTION_FREQUENCY must be >= 1, got: %s", n)
+        sys.exit(1)
+    return n
+
+
+def _parse_conversation_history_max_messages() -> int:
+    """0 = sin límite (enviar historial completo al LLM)."""
+    raw = os.environ.get("CONVERSATION_HISTORY_MAX_MESSAGES", "0").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        logger.critical(
+            "CONVERSATION_HISTORY_MAX_MESSAGES must be an integer, got: %r", raw
+        )
+        sys.exit(1)
+    if n < 0:
+        logger.critical(
+            "CONVERSATION_HISTORY_MAX_MESSAGES must be >= 0, got: %s", n
+        )
         sys.exit(1)
     return n
 
@@ -90,6 +108,7 @@ LLM_EXTRACTION_MODEL = _require_str("LLM_EXTRACTION_MODEL")
 
 # --- Optional ---
 EXTRACTION_FREQUENCY = _parse_extraction_frequency()
+CONVERSATION_HISTORY_MAX_MESSAGES = _parse_conversation_history_max_messages()
 PORT = _parse_port()
 POST_CALENDLY_FAREWELL_USER_MESSAGES = _parse_post_calendly_farewell_user_messages()
 
@@ -126,9 +145,10 @@ MSG_FALLBACK_LLM = (
 
 logger.info(
     "Config loaded: LLM_MODEL=%s LLM_EXTRACTION_MODEL=%s EXTRACTION_FREQUENCY=%s "
-    "POST_CALENDLY_FAREWELL_USER_MESSAGES=%s",
+    "CONVERSATION_HISTORY_MAX_MESSAGES=%s POST_CALENDLY_FAREWELL_USER_MESSAGES=%s",
     LLM_MODEL,
     LLM_EXTRACTION_MODEL,
     EXTRACTION_FREQUENCY,
+    CONVERSATION_HISTORY_MAX_MESSAGES,
     POST_CALENDLY_FAREWELL_USER_MESSAGES,
 )

@@ -61,6 +61,48 @@ def _history_plus_user(
     return [*history, {"role": "user", "content": text}]
 
 
+def _window_history_for_llm(
+    history: list[dict[str, Any]], max_messages: int
+) -> list[dict[str, Any]]:
+    if max_messages <= 0 or len(history) <= max_messages:
+        return list(history)
+    return list(history[-max_messages:])
+
+
+def _format_lead_snapshot_for_system(existing: dict[str, Any] | None) -> str:
+    if not existing:
+        return ""
+    lines: list[str] = []
+    for k in storage.LEAD_DATA_KEYS:
+        v = existing.get(k)
+        if v is None or str(v).strip() == "":
+            continue
+        lines.append(f"- {k}: {str(v).strip()}")
+    if not lines:
+        return ""
+    return (
+        "Datos ya registrados del cliente (no vuelvas a pedirlos salvo confirmación):\n"
+        + "\n".join(lines)
+    )
+
+
+def _norm_history_messages(
+    history: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    return [
+        {"role": str(m["role"]), "content": str(m["content"])} for m in history
+    ]
+
+
+def _history_for_post_calendly_farewell(
+    history: list[dict[str, Any]], url: str
+) -> list[dict[str, str]]:
+    idx = _index_last_assistant_with_calendly(history, url)
+    if idx is None:
+        return _norm_history_messages(history)
+    return _norm_history_messages(history[idx:])
+
+
 def _lead_row_complete(lead: dict[str, Any]) -> bool:
     for key in storage.LEAD_DATA_KEYS:
         v = lead.get(key)
@@ -273,13 +315,10 @@ def process_message(
             config.POST_CALENDLY_FAREWELL_USER_MESSAGES,
         ):
             logger.info("Despedida post-Calendly (LLM): chat_id=%s", cid)
-            hist_norm: list[dict[str, str]] = [
-                {"role": str(m["role"]), "content": str(m["content"])}
-                for m in history
-            ]
+            hist_fw = _history_for_post_calendly_farewell(history, config.CALENDLY_URL)
             messages_fw: list[dict[str, str]] = [
                 {"role": "system", "content": SYSTEM_PROMPT_POST_CALENDLY_FAREWELL},
-                *hist_norm,
+                *hist_fw,
                 {"role": "user", "content": text},
             ]
             try:
@@ -311,7 +350,9 @@ def process_message(
 
     user_count_in_sheet = count_user_messages(history)
     if user_count_in_sheet >= config.USER_MESSAGE_LIMIT:
-        final = extraction.extract_lead_data(history, cid)
+        final = extraction.extract_lead_data(
+            history, cid, merge_from_lead_row=existing_lead
+        )
         ok_limit = storage.upsert_lead(
             cid, final.model_dump() if final else {}, estado="limite_alcanzado"
         )
@@ -326,17 +367,27 @@ def process_message(
         )
         return _MSG_USER_LIMIT_FAREWELL.format(calendly_url=config.CALENDLY_URL)
 
+    hist_llm = _window_history_for_llm(
+        history, config.CONVERSATION_HISTORY_MAX_MESSAGES
+    )
     system_content = SYSTEM_PROMPT.replace("{calendly_url}", config.CALENDLY_URL)
+    snapshot = _format_lead_snapshot_for_system(existing_lead)
+    if snapshot:
+        system_content = f"{system_content}\n\n{snapshot}"
     messages: list[dict[str, str]] = [
         {"role": "system", "content": system_content},
-        *[{"role": str(m["role"]), "content": str(m["content"])} for m in history],
+        *[
+            {"role": str(m["role"]), "content": str(m["content"])}
+            for m in hist_llm
+        ],
         {"role": "user", "content": text},
     ]
     full_history = _history_plus_user(history, text)
 
     logger.debug(
-        "LLM conversacional: chat_id=%s turnos_historial=%s",
+        "LLM conversacional: chat_id=%s turnos_enviados=%s turnos_totales=%s",
         cid,
+        len(hist_llm),
         len(history),
     )
 
@@ -357,7 +408,9 @@ def process_message(
 
     closed_via_calendly_in_response = False
     if config.CALENDLY_URL in assistant_text:
-        rec_close = extraction.extract_lead_data(full_history, cid)
+        rec_close = extraction.extract_lead_data(
+            full_history, cid, merge_from_lead_row=existing_lead
+        )
         merged = _merge_lead_for_gate(existing_lead, rec_close)
         if not _can_close_with_calendly(merged):
             stripped = _remove_dangling_calendly_teasers(
@@ -394,7 +447,11 @@ def process_message(
         total_user = count_user_messages(history) + 1
         if should_extract(total_user):
             periodic_extraction_done = True
-            rec_p = extraction.extract_lead_data(full_history, cid)
+            max_m = config.CONVERSATION_HISTORY_MAX_MESSAGES
+            hist_ext = _window_history_for_llm(full_history, max_m)
+            rec_p = extraction.extract_lead_data(
+                hist_ext, cid, merge_from_lead_row=existing_lead
+            )
             if rec_p is not None:
                 _ = storage.upsert_lead(cid, rec_p.model_dump())
         else:
