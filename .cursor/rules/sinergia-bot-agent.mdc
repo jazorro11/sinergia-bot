@@ -39,7 +39,7 @@ storage.py → config.py
 
 ## Librerías permitidas
 
-`fastapi`, `uvicorn`, `python-telegram-bot`, `openai`, `gspread`, `google-auth`, `httpx`, `pydantic`, y stdlib. Desarrollo: `pytest`, `ruff`. No agregar otras sin justificación explícita.
+`fastapi`, `uvicorn`, `python-telegram-bot`, `openai`, `gspread`, `google-auth`, `httpx`, `pydantic`, `python-dotenv`, y stdlib. Desarrollo: `pytest`, `ruff`. No agregar otras sin justificación explícita.
 
 ## Reglas de implementación
 

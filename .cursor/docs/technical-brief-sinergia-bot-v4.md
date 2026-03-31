@@ -442,7 +442,7 @@ Si el cliente solicita agendar pero **no tiene los 3 campos mínimos** (`nombre`
 
 ## 4. Constraints (Restricciones)
 
-- Librerías permitidas: `fastapi`, `uvicorn`, `python-telegram-bot`, `openai`, `gspread`, `google-auth`, `httpx`, `pydantic`, y stdlib de Python. Dependencias de desarrollo: `pytest` y `ruff`. No añadir dependencias fuera de esta lista sin justificación explícita.
+- Librerías permitidas: `fastapi`, `uvicorn`, `python-telegram-bot`, `openai`, `gspread`, `google-auth`, `httpx`, `pydantic`, `python-dotenv`, y stdlib de Python. Dependencias de desarrollo: `pytest` y `ruff`. No añadir dependencias fuera de esta lista sin justificación explícita. **`python-dotenv`:** cargar opcionalmente un archivo `.env` en desarrollo local para poblar `os.environ` antes de importar `config.py`; en Railway/Render las variables ya vienen inyectadas y el archivo puede no existir; usar `load_dotenv(..., override=False)` para no sobrescribir claves ya definidas en el entorno.
 - Todas las llamadas al LLM pasan a través del cliente `openai` hacia la **API de OpenAI** (endpoint por defecto del SDK).
 - Type hints en todas las funciones públicas de los módulos principales.
 - Convenciones PEP 8. Linter: `ruff`.
@@ -493,7 +493,10 @@ El trabajo se considera terminado cuando:
 Antes de desplegar a producción, es obligatorio probar el bot con una conversación real en Telegram. El procedimiento es:
 
 1. **Instalar ngrok** (https://ngrok.com) o usar el túnel integrado de Railway/Render en modo preview.
-2. **Levantar el servidor localmente:** `uvicorn main:app --port 8000`.
+
+> **Variables en el proceso:** las credenciales deben estar **disponibles en el entorno del proceso** que ejecuta Uvicorn (`os.environ`). No basta con tener un archivo `.env` en disco a menos que el punto de entrada (`main.py`) lo cargue con `python-dotenv` (ver sección 8). En Windows/PowerShell, comprobar con `$env:TELEGRAM_BOT_TOKEN.Length` **después** de arrancar el servidor según el README: si sigue en 0 antes de arrancar pero existe `.env`, el proceso aún no está leyendo ese archivo.
+
+2. **Levantar el servidor localmente:** `uvicorn main:app --host 0.0.0.0 --port 8000`.
 3. **Exponer el puerto local:** `ngrok http 8000`. Ngrok entrega una URL pública temporal (ej: `https://abc123.ngrok-free.app`).
 4. **Registrar el webhook temporal en Telegram:** hacer un GET a `https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook?url=https://abc123.ngrok-free.app/webhook`.
 5. **Abrir Telegram** y buscar el bot por su nombre de usuario (el que se configuró en BotFather).
@@ -629,6 +632,12 @@ Antes de que el código funcione, hay que configurar cuatro servicios externos:
 | `EXTRACTION_FREQUENCY` | Cada cuántos mensajes del usuario se ejecuta la extracción | `1` | No (default: `1`) |
 | `LOG_LEVEL` | Nivel de logging | `INFO` | No (default: `INFO`) |
 | `PORT` | Puerto del servidor (inyectado por Railway/Render) | `8080` | No (default: `8000`) |
+
+### Archivo `.env` y `os.environ`
+
+- El código (en particular `config.py`) lee **solo** `os.environ`. Python **no** carga automáticamente un archivo `.env` del disco.
+- El archivo `.env` es una convención para desarrollo local; sus valores entran al proceso mediante **carga explícita** (`load_dotenv()` al inicio de `main.py`, antes de `from bot.webhook import app`) o mediante variables definidas en la plataforma de despliegue, el IDE o la shell.
+- **Desarrollo local recomendado:** `main.py` en la raíz del proyecto llama a `load_dotenv()` apuntando al `.env` junto a `main.py`, con `override=False`. Así `uvicorn main:app` y `python main.py` aplican el mismo `.env` al importar el módulo `main`, y en producción las variables de la plataforma tienen prioridad.
 
 ---
 

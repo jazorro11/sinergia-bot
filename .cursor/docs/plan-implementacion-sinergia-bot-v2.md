@@ -103,6 +103,7 @@ Lista de dependencias fijadas:
 - `google-auth` — autenticación con Google Service Account
 - `httpx` — cliente HTTP (dependencia interna de `python-telegram-bot` v20)
 - `pydantic` — validación de datos y schema del LeadRecord
+- `python-dotenv` — carga opcional del archivo `.env` en desarrollo local para poblar `os.environ` antes de importar `config.py`; en producción la plataforma inyecta variables y el archivo puede no existir
 
 Dependencias de desarrollo (no van a producción):
 - `pytest` — framework de tests
@@ -115,6 +116,8 @@ No se permite agregar dependencias fuera de esta lista sin justificación explí
 ### `.env.example`
 
 **Por qué existe:** es una plantilla que documenta qué variables de entorno necesita el proyecto. Se sube al repositorio para que cualquier desarrollador sepa qué configurar. El `.env` real con los valores secretos **nunca** se sube.
+
+**Nota:** copiar a `.env` no basta por sí solo: la aplicación solo ve valores que estén en `os.environ` tras cargar el archivo (p. ej. `load_dotenv()` en `main.py`) o exportar variables en la shell / IDE / plataforma de despliegue.
 
 **Variables que documenta (10 en total):**
 
@@ -406,9 +409,10 @@ Llama a `storage.save_conversation_turn()` dos veces:
 **Por qué existe:** es el archivo que se ejecuta para arrancar el servidor. Es el punto de entrada único del sistema.
 
 **Lógica:**
+- **Antes de cualquier import interno** que arrastre `bot.config` o `bot.webhook`: llamar a `load_dotenv()` desde `dotenv`, con ruta explícita al archivo `.env` en el directorio raíz del proyecto (mismo nivel que `main.py`), resolviendo la ruta con `pathlib.Path(__file__).resolve().parent / ".env"`, y `override=False` para no pisar variables ya definidas en el entorno (p. ej. en Railway/Render).
 - Importa la app FastAPI definida en `bot/webhook.py`.
 - Arranca `uvicorn` escuchando en el puerto que define la variable de entorno `PORT` (default `8000`). Railway y Render inyectan este valor automáticamente.
-- No contiene lógica de negocio. Solo inicialización.
+- No contiene lógica de negocio. Solo inicialización y carga de entorno local.
 
 ---
 
@@ -515,7 +519,7 @@ Llama a `storage.save_conversation_turn()` dos veces:
    - Crear entorno virtual (`python -m venv .venv` y activarlo).
    - Instalar dependencias (`pip install -r requirements.txt`).
    - Copiar `.env.example` a `.env` y completar los valores.
-   - Correr el servidor localmente (`uvicorn main:app --port 8000`).
+   - Correr el servidor localmente: `uvicorn main:app --host 0.0.0.0 --port 8000` (o el puerto deseado). Al cargar el módulo `main`, se ejecuta `load_dotenv()` antes de importar la app, por lo que el `.env` en la raíz del repo se aplica automáticamente. Alternativa sin depender del orden de imports del módulo: `python -m dotenv run -- uvicorn main:app --host 0.0.0.0 --port 8000`.
 4. Tabla de variables de entorno con descripciones, ejemplos y valores por defecto.
 5. Instrucciones para configurar el webhook de Telegram (cómo registrar la URL del servidor con la API de Telegram, incluyendo ngrok para pruebas locales).
 6. Estructura del Google Sheet: nombres de hojas (`leads` y `conversaciones`) y columnas esperadas en cada una.
@@ -544,7 +548,10 @@ No genera archivos. Es una fase de ejecución obligatoria antes de considerar el
 **Procedimiento:**
 
 1. Instalar ngrok localmente (https://ngrok.com) o usar el túnel integrado de Railway/Render en modo preview.
-2. Levantar el servidor localmente: `uvicorn main:app --port 8000`.
+
+   Asegurarse de que las variables estén en el proceso que ejecuta Uvicorn (véase brief v4 sección 5, nota sobre `.env` vs `os.environ`, y sección 8).
+
+2. Levantar el servidor localmente: `uvicorn main:app --host 0.0.0.0 --port 8000`.
 3. Exponer el puerto local: `ngrok http 8000`. Ngrok entrega una URL pública temporal (ej: `https://abc123.ngrok-free.app`).
 4. Registrar el webhook temporal en Telegram: hacer un GET a `https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook?url=https://abc123.ngrok-free.app/webhook`.
 5. Abrir Telegram y buscar el bot por su nombre de usuario (el que se configuró en BotFather).
@@ -598,7 +605,7 @@ No genera archivos. Es una fase de ejecución obligatoria antes de considerar el
 | `bot/extraction.py` | Nuevo | Schema `LeadRecord` (Pydantic) y llamada al LLM de extracción. |
 | `bot/conversation.py` | Nuevo | Flujo completo de procesamiento de un mensaje (el cerebro). |
 | `bot/webhook.py` | Nuevo | FastAPI endpoint, retorna 200 inmediato, procesa en background. |
-| `main.py` | Nuevo | Punto de entrada, arranca uvicorn. |
+| `main.py` | Nuevo | Punto de entrada: `load_dotenv()` y arranque de uvicorn. |
 | `requirements.txt` | Nuevo | Dependencias del proyecto. |
 | `.env.example` | Nuevo | Plantilla de variables de entorno. |
 | `.gitignore` | Nuevo | Archivos y carpetas ignorados por Git. |
