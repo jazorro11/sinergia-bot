@@ -50,6 +50,7 @@ sinergia-bot/
 │
 ├── tests/
 │   ├── __init__.py
+│   ├── conftest.py
 │   ├── test_conversation.py
 │   ├── test_extraction.py
 │   └── test_integration.py
@@ -585,11 +586,10 @@ No genera archivos. Es una fase de ejecución obligatoria antes de considerar el
 | 7 | `bot/conversation.py` | Todos los anteriores | Orquesta todo. Es el último módulo de lógica. |
 | 8 | `bot/webhook.py` | `conversation.py`, `config.py`, `logger.py` | Punto de entrada HTTP. Necesita que exista la lógica. |
 | 9 | `main.py` | `webhook.py` | Solo arranca el servidor. |
-| 10 | `tests/test_conversation.py`, `tests/test_extraction.py` | Módulos correspondientes | Verifican la lógica de cada módulo en aislamiento. |
-| 11 | `tests/test_integration.py` | Todos los módulos | Solo tiene sentido cuando todo existe. |
-| 12 | `README.md` | Todo | Al final, cuando se sabe exactamente qué necesita el proyecto. |
-| 13 | Deploy inicial | `README.md`, servicios externos configurados | El código debe estar completo y documentado. |
-| 14 | Prueba manual | Deploy o ngrok | Requiere un servidor corriendo y servicios externos listos. |
+| 10 | `tests/test_conversation.py`, `tests/test_extraction.py`, `tests/test_integration.py`, `tests/conftest.py` | Todos los módulos de `bot/` | Alineado con la sección «Fase 10 — Tests unitarios»: unitarios + integración; `conftest.py` fija entorno para imports de `config`. |
+| 11 | `README.md` | Todo | Al final, cuando se sabe exactamente qué necesita el proyecto. |
+| 12 | Deploy inicial | `README.md`, servicios externos configurados | El código debe estar completo y documentado. |
+| 13 | Prueba manual | Deploy o ngrok | Requiere un servidor corriendo y servicios externos listos. |
 
 ---
 
@@ -611,6 +611,7 @@ No genera archivos. Es una fase de ejecución obligatoria antes de considerar el
 | `.gitignore` | Nuevo | Archivos y carpetas ignorados por Git. |
 | `README.md` | Nuevo | Documentación del proyecto. |
 | `tests/__init__.py` | Nuevo | Archivo vacío, convierte `tests/` en paquete Python. |
+| `tests/conftest.py` | Nuevo | Variables de entorno dummy para tests y fixture de horario no silencio. |
 | `tests/test_conversation.py` | Nuevo | Tests unitarios de los 6 casos del DoD. |
 | `tests/test_extraction.py` | Nuevo | Tests del módulo de extracción. |
 | `tests/test_integration.py` | Nuevo | Test de conversación completa de principio a fin. |

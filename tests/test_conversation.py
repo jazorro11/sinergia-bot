@@ -1,0 +1,216 @@
+"""Unit tests for bot.conversation and webhook DoD cases."""
+
+from __future__ import annotations
+
+from collections.abc import Coroutine
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from bot import config
+from bot.conversation import process_message
+from bot.extraction import LeadRecord
+from bot.storage import LEADS_HEADERS, upsert_lead
+
+
+def _conv_completion(content: str) -> MagicMock:
+    msg = MagicMock()
+    msg.content = content
+    choice = MagicMock()
+    choice.message = msg
+    resp = MagicMock()
+    resp.choices = [choice]
+    return resp
+
+
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.is_silence_hours", return_value=True)
+def test_silence_hours_no_llm_no_storage_reads(
+    _silence: MagicMock,
+    mock_llm: MagicMock,
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+) -> None:
+    out = process_message(1, 1, "hola", 12345, False)
+    assert out == config.MSG_SILENCE_ABSENCE
+    mock_llm.assert_not_called()
+    mock_get_lead.assert_not_called()
+    mock_get_history.assert_not_called()
+
+
+@patch("bot.conversation.storage.mark_conversation_closed")
+@patch("bot.conversation.storage.upsert_lead")
+@patch("bot.conversation.extraction.extract_lead_data")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_user_message_limit_triggers_final_extraction_and_closure(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_extract: MagicMock,
+    mock_upsert: MagicMock,
+    mock_mark_closed: MagicMock,
+) -> None:
+    mock_get_lead.return_value = None
+    mock_get_history.return_value = [
+        {"role": "user", "content": f"m{i}"} for i in range(30)
+    ]
+    mock_extract.return_value = LeadRecord(nombre="X")
+    out = process_message(1, 1, "one more", 12345, False)
+    mock_extract.assert_called_once()
+    mock_upsert.assert_called_once()
+    assert mock_upsert.call_args.kwargs["estado"] == "limite_alcanzado"
+    mock_mark_closed.assert_called_once()
+    assert config.CALENDLY_URL in out
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.storage.mark_conversation_closed")
+@patch("bot.conversation.storage.upsert_lead")
+@patch("bot.conversation.extraction.extract_lead_data")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_calendly_in_assistant_response_closes_once(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_llm: MagicMock,
+    mock_extract: MagicMock,
+    mock_upsert: MagicMock,
+    mock_mark_closed: MagicMock,
+    _save: MagicMock,
+) -> None:
+    mock_get_lead.return_value = None
+    mock_get_history.return_value = []
+    mock_llm.return_value = _conv_completion(
+        f"Listo, agenda aquí: {config.CALENDLY_URL}"
+    )
+    mock_extract.return_value = LeadRecord(nombre="N")
+    out = process_message(42, 7, "quiero agendar", 999, False)
+    assert config.CALENDLY_URL in out
+    mock_extract.assert_called_once()
+    mock_upsert.assert_called_once()
+    assert mock_upsert.call_args.kwargs["estado"] == "calendly_enviado"
+    mock_mark_closed.assert_called_once()
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.storage.upsert_lead")
+@patch("bot.conversation.extraction.extract_lead_data")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_extraction_frequency_every_second_message(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_llm: MagicMock,
+    mock_extract: MagicMock,
+    mock_upsert: MagicMock,
+    _save: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("bot.conversation.config.EXTRACTION_FREQUENCY", 2)
+    mock_get_lead.return_value = None
+    mock_llm.return_value = _conv_completion("sigamos")
+    mock_extract.return_value = LeadRecord(ciudad="Y")
+    histories = [
+        [],
+        [{"role": "user", "content": "a"}],
+        [
+            {"role": "user", "content": "a"},
+            {"role": "user", "content": "b"},
+        ],
+    ]
+    mock_get_history.side_effect = histories.copy()
+    process_message(1, 1, "first", 1, False)
+    process_message(1, 1, "second", 2, False)
+    process_message(1, 1, "third", 3, False)
+    assert mock_extract.call_count == 1
+
+
+@patch("bot.storage._worksheet")
+def test_upsert_lead_does_not_overwrite_existing_with_none(
+    mock_worksheet: MagicMock,
+) -> None:
+    headers = list(LEADS_HEADERS)
+    row = [""] * len(headers)
+    col = {h: i for i, h in enumerate(headers)}
+    row[col["chat_id"]] = "7"
+    row[col["nombre"]] = "Carlos"
+    row[col["estado"]] = "en_curso"
+    row[col["created_at"]] = "2020-01-01T00:00:00+00:00"
+    row[col["updated_at"]] = "2020-01-01T00:00:00+00:00"
+    ws = MagicMock()
+    ws.get_all_values.return_value = [headers, row]
+    mock_worksheet.return_value = ws
+    upsert_lead(
+        "7",
+        {"nombre": None, "ciudad": "Bogotá"},
+        estado=None,
+    )
+    ws.batch_update.assert_called_once()
+    batch = ws.batch_update.call_args[0][0]
+    assert any(u.get("values") == [["Bogotá"]] for u in batch)
+    assert not any(
+        u.get("values") == [[""]] or u.get("values") == [[None]] for u in batch
+    )
+    # nombre "Carlos" must not be sent as an update value
+    flat_vals = [v for u in batch for row_ in u.get("values", []) for v in row_]
+    assert "Carlos" not in flat_vals
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+@patch("bot.conversation.config.llm.chat.completions.create")
+def test_llm_failure_returns_fallback_and_logs_error(
+    mock_llm: MagicMock,
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    _save: MagicMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    mock_get_lead.return_value = None
+    mock_get_history.return_value = []
+    mock_llm.side_effect = RuntimeError("timeout")
+    caplog.set_level("ERROR", logger="bot.conversation")
+    out = process_message(1, 1, "hola", 1, False)
+    assert out == config.MSG_FALLBACK_LLM
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+
+
+def test_webhook_returns_200_and_schedules_background_task() -> None:
+    from fastapi.testclient import TestClient
+
+    from bot import webhook as wh
+
+    payload = {
+        "update_id": 1,
+        "message": {
+            "message_id": 1,
+            "date": 1700000000,
+            "chat": {"id": 1001, "type": "private"},
+            "from": {"id": 2002, "is_bot": False, "first_name": "T"},
+            "text": "hola",
+        },
+    }
+    mock_bot = MagicMock()
+    mock_bot.initialize = AsyncMock()
+    mock_bot.shutdown = AsyncMock()
+    mock_bot.send_message = AsyncMock()
+    def _fake_create_task(coro: Coroutine[Any, Any, None]) -> MagicMock:
+        coro.close()
+        t = MagicMock()
+        t.add_done_callback = MagicMock()
+        return t
+
+    with (
+        patch("bot.webhook.telegram_bot", mock_bot),
+        patch("bot.webhook.asyncio.create_task", side_effect=_fake_create_task) as mock_ct,
+    ):
+        with TestClient(wh.app) as client:
+            r = client.post("/webhook", json=payload)
+    assert r.status_code == 200
+    mock_ct.assert_called()
