@@ -1,0 +1,115 @@
+---
+description: Sinergia Bot — proyecto, stack, arquitectura y comportamiento del agente
+alwaysApply: true
+---
+
+# Sinergia Bot — Reglas del Agente
+
+## Qué es este proyecto
+
+Chatbot de Telegram para Estudio Sinergia (diseño de interiores y construcción residencial en Colombia). El bot atiende clientes potenciales, recopila datos del proyecto de forma conversacional y los lleva a agendar una llamada con Alejandro vía Calendly.
+
+## Regla fundamental
+
+La conversación debe sentirse completamente humana. El bot NO debe parecer bot (tono, ritmo, longitud). La captura no es un formulario secuencial: el orden de los datos es orgánico según el flujo natural.
+
+## Stack obligatorio
+
+- Python 3.11+
+- FastAPI — único endpoint POST `/webhook`
+- python-telegram-bot v20+ — solo para enviar mensajes (`send_message`); sin polling ni handlers del paquete para el flujo principal
+- Cliente **`openai`** apuntando a **OpenRouter** (`https://openrouter.ai/api/v1`) — todas las llamadas al LLM pasan por ahí
+- Modelos configurables por env: **`LLM_MODEL`** (conversación, ej. `openai/gpt-4o`) y **`LLM_EXTRACTION_MODEL`** (extracción, ej. `openai/gpt-4o-mini`)
+- **Pydantic** — `LeadRecord` y validación
+- Google Sheets vía **gspread + Service Account** — **NO** usar MCP en el código del bot
+- Logging: stdlib `logging` centralizado en `bot/logger.py` — **sin `print()`**
+- Despliegue: **Railway o Render**
+
+## Arquitectura — orden de dependencias
+
+```
+main.py → webhook.py → conversation.py → config.py, prompts.py, storage.py, extraction.py
+extraction.py → config.py, prompts.py
+storage.py → config.py
+```
+
+`logger.py` y `config.py` no importan otros módulos internos (salvo que `logger.py` lea solo `LOG_LEVEL` de `os.environ`, excepción explícita del brief). Las dependencias apuntan hacia adentro; `prompts.py` solo constantes de texto, sin lógica.
+
+**Patrón webhook:** responder HTTP **200 inmediatamente** (<1 s) y procesar en **background** (`asyncio.create_task` o `BackgroundTasks`); el envío al usuario es vía API de Telegram, no en el body de la respuesta HTTP.
+
+## Librerías permitidas
+
+`fastapi`, `uvicorn`, `python-telegram-bot`, `openai`, `gspread`, `google-auth`, `httpx`, `pydantic`, y stdlib. Desarrollo: `pytest`, `ruff`. No agregar otras sin justificación explícita.
+
+## Reglas de implementación
+
+- Type hints en todas las funciones públicas de `conversation.py`, `extraction.py`, `storage.py` y `webhook.py`
+- PEP 8, linter **ruff**
+- Credenciales solo en variables de entorno; **prohibido** hardcodear tokens, keys o IDs de Sheet en código
+- Sin estado en memoria entre peticiones: historial y leads viven en Google Sheets
+- Prompts solo en **`prompts.py`** (`SYSTEM_PROMPT` con placeholder `{calendly_url}`, `EXTRACTION_PROMPT`) — ningún otro módulo arma prompts inline
+- **`storage.upsert_lead`**: merge solo de vacío → valor; nunca sobrescribir un campo ya poblado con `None`
+- Extracción periódica según **`EXTRACTION_FREQUENCY`** (default `1`); **siempre** extracción final al cierre (Calendly en respuesta, 9 campos, límite 30, etc.), independiente del conteo
+- El MCP de Google Sheets es **solo** para desarrollo/inspección, **nunca** en el código del bot
+
+## Comportamiento crítico del bot
+
+- Retraso fijo **1000 ms** antes de enviar cada respuesta al usuario (background)
+- Franja de silencio **22:00–07:00** hora Colombia (UTC-5): mensaje de ausencia y **sin** llamar al LLM ni tocar Sheets para la lógica conversacional principal
+- Mensaje de ausencia: `Hola! En este momento no estoy disponible, pero mañana en la mañana te respondo 😌`
+- Solo texto (incluye **`edited_message`** tratado como mensaje nuevo). Ante no-texto: respuesta gentil desde `config.py`
+- Límite **30 mensajes** del usuario por conversación → cierre forzado, estado `limite_alcanzado`, Calendly + despedida según brief
+- **Cierre principal:** la respuesta del LLM contiene la cadena de **`CALENDLY_URL`** → extracción final, `upsert_lead` con `calendly_enviado`, `mark_conversation_closed`
+- **Cierre respaldo:** tras extracción periódica, si los **9 campos** del lead en Sheets están completos → mismo estado de cierre en Sheets (sin depender de que el LLM haya pegado la URL)
+- Estados de lead: `en_curso` | `calendly_enviado` | `limite_alcanzado` | `no_agendar`
+- Conversación ya cerrada: mensaje fijo sin LLM (Calendly URL en el texto para `calendly_enviado` / `limite_alcanzado`; mensaje distinto para `no_agendar` — ver brief)
+- Reglas de negocio de cuándo el LLM envía Calendly (9 campos, solicitud anticipada con mínimos **nombre + ciudad + area_aprox**, no agendar): definidas en el system prompt del brief; el código detecta cierre operativo por URL y por filas completas según plan v2
+
+## Google Sheets — estructura
+
+- ID del spreadsheet: variable **`GOOGLE_SHEET_ID`** (no fijar ID en código)
+- Hoja **`leads`**: `chat_id`, los 9 campos del `LeadRecord`, `estado`, `created_at`, **`updated_at`**
+- Hoja **`conversaciones`**: `chat_id`, `role`, `content`, `timestamp`, `estado`
+- Para interactuar con Sheets **durante desarrollo** (MCP, inspección): consultar primero `.cursor/skills/use-google-sheets.md`
+
+## Variables de entorno (referencia)
+
+Requeridas: `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY`, `GOOGLE_SERVICE_ACCOUNT_JSON`, `GOOGLE_SHEET_ID`, `CALENDLY_URL`, `LLM_MODEL`, `LLM_EXTRACTION_MODEL`. Opcionales: `EXTRACTION_FREQUENCY` (default `1`), `LOG_LEVEL` (default `INFO`), `PORT` (default `8000`).
+
+## Orden de implementación (plan v2)
+
+1. `requirements.txt`, `.env.example`, `.gitignore`, `bot/__init__.py`, `tests/__init__.py`
+2. `bot/logger.py`
+3. `bot/config.py`
+4. `bot/prompts.py`
+5. `bot/storage.py`
+6. `bot/extraction.py` (`LeadRecord` + `extract_lead_data`)
+7. `bot/conversation.py`
+8. `bot/webhook.py`
+9. `main.py`
+10. `tests/test_conversation.py`, `tests/test_extraction.py`
+11. `tests/test_integration.py`
+12. `README.md`
+
+## Manejo de errores (resumen)
+
+- LLM conversacional falla → fallback al usuario (mensaje del brief); log `ERROR`
+- Extracción falla → `None`; usuario ya tiene respuesta; log `ERROR`
+- Sheets lectura (historial) falla → fallback “agenda”; Sheets lectura estado lead falla → asumir `en_curso` y continuar
+- Sheets escritura falla → log `ERROR`, no propagar (respuesta ya generada)
+- Webhook siempre **200** a Telegram de inmediato
+
+## Documentos de referencia completos
+
+- Brief técnico: `.cursor/docs/technical-brief-sinergia-bot-v4.md`
+- Plan de implementación: `.cursor/docs/plan-implementacion-sinergia-bot-v2.md`
+
+## Definition of Done (alineado al brief v4)
+
+- `ruff` sin errores
+- Type hints en funciones públicas de `conversation`, `extraction`, `storage`, `webhook`
+- Tests unitarios: silencio nocturno (sin LLM); límite 30 + `limite_alcanzado`; cierre con Calendly / 9 campos; `EXTRACTION_FREQUENCY` + upsert sin borrar con `None`; fallback OpenRouter; webhook 200 inmediato + background
+- Test de integración: conversación completa hasta cierre con Calendly
+- README: instalación, webhook, tabla de variables, estructura del Sheet, deploy Railway/Render
+- Logging según sección 6 del brief (eventos críticos, **sin** PII en INFO+)
+- Prueba manual obligatoria antes de producción (procedimiento en brief / plan fase 13)

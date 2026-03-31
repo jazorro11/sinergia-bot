@@ -1,0 +1,12 @@
+{
+    "mcpServers": {
+      "google-sheets": {
+        "command": "npx",
+        "args": ["-y", "mcp-gsheets@latest"],
+        "env": {
+          "GOOGLE_PROJECT_ID": "sinergia-bot-491504",
+          "GOOGLE_APPLICATION_CREDENTIALS": "C:\\Users\\jzorr\\Desktop\\Credentials\\sinergia-bot-491504-f081d86ece11.json"
+        }
+      }
+    }
+  }

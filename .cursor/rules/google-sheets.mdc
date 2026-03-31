@@ -1,0 +1,17 @@
+---
+description: Google Sheets en sinergia-bot — orquestación antes de leer o escribir
+alwaysApply: true
+---
+
+# Google Sheets (sinergia-bot)
+
+El código del bot usa **gspread**. Esta regla aplica cuando uses el **MCP** `google-sheets` o revises skills de Sheets en **desarrollo/inspección**. Antes de operar con el MCP sobre el spreadsheet, **lee primero** el archivo:
+
+`.cursor/skills/use-google-sheets.md`
+
+Ese skill es el **punto de entrada único**: define si corresponde inspección, escritura o ambas en secuencia y enlaza a:
+
+- `.cursor/skills/inspect-database.md` — lectura
+- `.cursor/skills/write-database.md` — escritura
+
+No uses las herramientas del MCP ni definas rangos, columnas o reglas de integridad “a mano” sin haber seguido esa cadena.
