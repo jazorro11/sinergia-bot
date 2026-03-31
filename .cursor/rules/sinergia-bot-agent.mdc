@@ -18,8 +18,8 @@ La conversación debe sentirse completamente humana. El bot NO debe parecer bot 
 - Python 3.11+
 - FastAPI — único endpoint POST `/webhook`
 - python-telegram-bot v20+ — solo para enviar mensajes (`send_message`); sin polling ni handlers del paquete para el flujo principal
-- Cliente **`openai`** apuntando a **OpenRouter** (`https://openrouter.ai/api/v1`) — todas las llamadas al LLM pasan por ahí
-- Modelos configurables por env: **`LLM_MODEL`** (conversación, ej. `openai/gpt-4o`) y **`LLM_EXTRACTION_MODEL`** (extracción, ej. `openai/gpt-4o-mini`)
+- Cliente **`openai`** hacia la **API de OpenAI** (endpoint por defecto del SDK) — todas las llamadas al LLM pasan por ahí
+- Modelos configurables por env: **`LLM_MODEL`** (conversación, ej. `gpt-4o`) y **`LLM_EXTRACTION_MODEL`** (extracción, ej. `gpt-4o-mini`)
 - **Pydantic** — `LeadRecord` y validación
 - Google Sheets vía **gspread + Service Account** — **NO** usar MCP en el código del bot
 - Logging: stdlib `logging` centralizado en `bot/logger.py` — **sin `print()`**
@@ -74,7 +74,7 @@ storage.py → config.py
 
 ## Variables de entorno (referencia)
 
-Requeridas: `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY`, `GOOGLE_SERVICE_ACCOUNT_JSON`, `GOOGLE_SHEET_ID`, `CALENDLY_URL`, `LLM_MODEL`, `LLM_EXTRACTION_MODEL`. Opcionales: `EXTRACTION_FREQUENCY` (default `1`), `LOG_LEVEL` (default `INFO`), `PORT` (default `8000`).
+Requeridas: `TELEGRAM_BOT_TOKEN`, `OPENAI_API_KEY`, `GOOGLE_SERVICE_ACCOUNT_JSON`, `GOOGLE_SHEET_ID`, `CALENDLY_URL`, `LLM_MODEL`, `LLM_EXTRACTION_MODEL`. Opcionales: `EXTRACTION_FREQUENCY` (default `1`), `LOG_LEVEL` (default `INFO`), `PORT` (default `8000`).
 
 ## Orden de implementación (plan v2)
 
@@ -108,7 +108,7 @@ Requeridas: `TELEGRAM_BOT_TOKEN`, `OPENROUTER_API_KEY`, `GOOGLE_SERVICE_ACCOUNT_
 
 - `ruff` sin errores
 - Type hints en funciones públicas de `conversation`, `extraction`, `storage`, `webhook`
-- Tests unitarios: silencio nocturno (sin LLM); límite 30 + `limite_alcanzado`; cierre con Calendly / 9 campos; `EXTRACTION_FREQUENCY` + upsert sin borrar con `None`; fallback OpenRouter; webhook 200 inmediato + background
+- Tests unitarios: silencio nocturno (sin LLM); límite 30 + `limite_alcanzado`; cierre con Calendly / 9 campos; `EXTRACTION_FREQUENCY` + upsert sin borrar con `None`; fallback LLM conversacional; webhook 200 inmediato + background
 - Test de integración: conversación completa hasta cierre con Calendly
 - README: instalación, webhook, tabla de variables, estructura del Sheet, deploy Railway/Render
 - Logging según sección 6 del brief (eventos críticos, **sin** PII en INFO+)

@@ -19,7 +19,7 @@ webhook.py  →  retorna HTTP 200 inmediatamente
 conversation.py  →  orquesta toda la lógica
       ↓              ├─ verifica restricciones (horario, conv. cerrada, límite)
       ↓              ├─ lee historial de Sheets
-      ↓              ├─ llama al LLM conversacional vía OpenRouter
+      ↓              ├─ llama al LLM conversacional vía la API de OpenAI
       ↓              ├─ detecta cierre por URL de Calendly en respuesta
       ↓              ├─ ejecuta extracción periódica (si toca)
       ↓              └─ detecta cierre por 9 campos completos
@@ -98,7 +98,7 @@ Lista de dependencias fijadas:
 - `fastapi` — framework web que recibe el webhook
 - `uvicorn` — servidor ASGI que ejecuta FastAPI (FastAPI no se puede correr solo; sin `uvicorn`, la aplicación no arranca)
 - `python-telegram-bot>=20` — librería para enviar mensajes a Telegram
-- `openai` — cliente oficial de OpenAI (se usa apuntando a OpenRouter)
+- `openai` — cliente oficial de OpenAI (endpoint por defecto de la API de OpenAI)
 - `gspread` — librería para leer y escribir Google Sheets
 - `google-auth` — autenticación con Google Service Account
 - `httpx` — cliente HTTP (dependencia interna de `python-telegram-bot` v20)
@@ -120,12 +120,12 @@ No se permite agregar dependencias fuera de esta lista sin justificación explí
 
 Requeridas (el sistema falla al arrancar si faltan):
 - `TELEGRAM_BOT_TOKEN` — token del bot de Telegram (lo da BotFather)
-- `OPENROUTER_API_KEY` — clave de API de OpenRouter
+- `OPENAI_API_KEY` — clave de API de OpenAI
 - `GOOGLE_SERVICE_ACCOUNT_JSON` — contenido del JSON de credenciales de Google como string
 - `GOOGLE_SHEET_ID` — ID del Google Sheet con las hojas `leads` y `conversaciones`
 - `CALENDLY_URL` — URL pública del evento de Calendly
-- `LLM_MODEL` — modelo para conversación (ej: `openai/gpt-4o`)
-- `LLM_EXTRACTION_MODEL` — modelo para extracción (ej: `openai/gpt-4o-mini`)
+- `LLM_MODEL` — modelo para conversación (ej: `gpt-4o`)
+- `LLM_EXTRACTION_MODEL` — modelo para extracción (ej: `gpt-4o-mini`)
 
 Opcionales (tienen valores por defecto):
 - `EXTRACTION_FREQUENCY` — cada cuántos mensajes del usuario se ejecuta la extracción (default: `1`)
@@ -180,7 +180,7 @@ Opcionales (tienen valores por defecto):
 
 2. Parsea `GOOGLE_SERVICE_ACCOUNT_JSON` de string a dict (viene como string para poder pasarlo en Railway/Render sin subir archivos).
 
-3. Inicializa dos clientes `openai.OpenAI`, ambos apuntando a `https://openrouter.ai/api/v1` con la misma `OPENROUTER_API_KEY`:
+3. Inicializa dos clientes `openai.OpenAI` con `api_key=os.environ["OPENAI_API_KEY"]` y el endpoint por defecto del SDK (sin `base_url` salvo necesidad futura de proxy u otro host compatible):
    - `llm` — para llamadas conversacionales (usa `LLM_MODEL`)
    - `llm_extraction` — para llamadas de extracción (usa `LLM_EXTRACTION_MODEL`)
    - Son dos instancias separadas para claridad, aunque técnicamente podrían ser una sola.
@@ -271,7 +271,7 @@ No tiene funciones ni lógica. Solo define dos constantes de texto:
 1. Construye los mensajes para el LLM de extracción: el `EXTRACTION_PROMPT` (importado de `prompts.py`) como system message, más el historial completo de la conversación como contexto.
 
 2. Llama a `llm_extraction` (importado de `config.py`) con:
-   - `model` = valor de `LLM_EXTRACTION_MODEL` (default: `openai/gpt-4o-mini`)
+   - `model` = valor de `LLM_EXTRACTION_MODEL` (default: `gpt-4o-mini`)
    - `temperature` = 0.0 (extracción determinista, no creativa)
    - `response_format` con `json_schema` usando `LeadRecord.model_json_schema()` para obtener structured output
 
@@ -420,7 +420,7 @@ Llama a `storage.save_conversation_turn()` dos veces:
 
 ### `tests/test_conversation.py`
 
-**Por qué existe:** contiene los tests unitarios de los casos críticos definidos en el DoD (sección 5 del brief v4). Cada test aísla una función específica usando mocks que reemplazan dependencias reales (OpenRouter, Google Sheets, Telegram).
+**Por qué existe:** contiene los tests unitarios de los casos críticos definidos en el DoD (sección 5 del brief v4). Cada test aísla una función específica usando mocks que reemplazan dependencias reales (API de OpenAI / LLM, Google Sheets, Telegram).
 
 **Tests que contiene:**
 
@@ -451,7 +451,7 @@ Llama a `storage.save_conversation_turn()` dos veces:
 - Verifica que la extracción se ejecutó en el mensaje 2 (conteo par) pero no en el 1 ni en el 3.
 - Para el test de upsert: mockea un lead existente con `nombre="Carlos"`. Ejecuta un upsert con un `LeadRecord` donde `nombre=None` y `ciudad="Bogotá"`. Verifica que después del upsert, `nombre` sigue siendo `"Carlos"` y `ciudad` es `"Bogotá"`.
 
-**Test 8 — Fallback de OpenRouter (DoD #8):**
+**Test 8 — Fallback ante error del LLM conversacional (DoD #8):**
 - Mockea el cliente LLM conversacional para que lance una excepción (timeout o error de cuota).
 - Llama a `process_message()`.
 - Verifica que el usuario recibe el mensaje de fallback: `"Disculpa, tuve un problema y no me muestra los últimos mensajes ¿Puedes repetir por favor?"`.
@@ -509,7 +509,7 @@ Llama a `storage.save_conversation_turn()` dos veces:
 **Qué incluye:**
 
 1. Descripción breve del proyecto y su propósito.
-2. Requisitos previos: Python 3.11+, cuentas en Telegram (BotFather), OpenRouter, Google Cloud (Service Account), y Calendly.
+2. Requisitos previos: Python 3.11+, cuentas en Telegram (BotFather), OpenAI (API key), Google Cloud (Service Account), y Calendly.
 3. Instrucciones de instalación local paso a paso:
    - Clonar el repo.
    - Crear entorno virtual (`python -m venv .venv` y activarlo).
@@ -570,7 +570,7 @@ No genera archivos. Es una fase de ejecución obligatoria antes de considerar el
 | Fase | Archivos | Depende de | Justificación |
 |---|---|---|---|
 | 1 | `requirements.txt`, `.env.example`, `.gitignore`, `bot/__init__.py`, `tests/__init__.py` | Nada | Infraestructura base sin lógica. |
-| 2 | `bot/logger.py` | Nada | Todos los módulos lo importan. Va primero. |
+| 2 | `bot/logger.py` | Fase 1 (paquete `bot/` existente) | Todos los módulos lo importan; sin dependencias de imports internos, pero el archivo vive bajo `bot/` creado en Fase 1. |
 | 3 | `bot/config.py` | `logger.py` | Segundo en la jerarquía. Todo lo demás usa la configuración. |
 | 4 | `bot/prompts.py` | Nada | Solo texto. Se necesita antes de `conversation.py` y `extraction.py`. |
 | 5 | `bot/storage.py` | `config.py`, `logger.py` | La conversación y extracción dependen de leer/escribir datos. |

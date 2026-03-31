@@ -27,8 +27,8 @@ El objetivo de esta tarea es **implementar un bot conversacional en Telegram que
 - **Lenguaje:** Python 3.11+
 - **Framework web:** FastAPI — expone un único endpoint POST `/webhook` que recibe eventos de Telegram
 - **Librería del bot:** `python-telegram-bot` v20+
-- **IA conversacional:** Cliente `openai` de Python apuntando a OpenRouter (API compatible con OpenAI)
-- **Modelo por defecto:** `openai/gpt-4o` (configurable vía variable de entorno para cambiar a cualquier modelo disponible en OpenRouter sin modificar código)
+- **IA conversacional:** Cliente oficial `openai` de Python hacia la **API de OpenAI** (endpoint por defecto del SDK)
+- **Modelo por defecto:** `gpt-4o` (configurable vía variable de entorno para usar otro modelo disponible en tu cuenta/plan sin modificar código)
 - **Persistencia:** Google Sheets vía `gspread` + Google Service Account
 - **Agendamiento:** Enlace externo de Calendly (sin integración API). El bot envía la URL al cierre de la conversación.
 - **Logging:** `logging` de la stdlib de Python, con salida a stdout (capturado automáticamente por Railway/Render)
@@ -41,19 +41,26 @@ El objetivo de esta tarea es **implementar un bot conversacional en Telegram que
 Para el MVP se adopta una **arquitectura de capas simples**, priorizando la velocidad de desarrollo y la claridad sobre la complejidad estructural.
 
 ```
-/bot
-  webhook.py        # FastAPI: recibe y valida webhooks de Telegram
-  conversation.py   # Lógica: maneja el flujo conversacional, llama al LLM, orquesta extracción
-  extraction.py     # Extracción: schema de respuesta + llamada estructurada al LLM
-  storage.py        # Persistencia: lee/escribe en Google Sheets (historial + leads)
-  config.py         # Variables de entorno, configuración global y clientes LLM
-  prompts.py        # System prompt y prompt de extracción como constantes de texto
-  logger.py         # Configuración centralizada del logging
-
-main.py             # Punto de entrada
-requirements.txt
-.env.example
+sinergia-bot/
+├── bot/
+│   ├── __init__.py      # Paquete Python (Fase 1 del plan de implementación v2)
+│   ├── logger.py        # Logging centralizado (Fase 2)
+│   ├── config.py        # Variables de entorno y clientes LLM
+│   ├── prompts.py       # System prompt y prompt de extracción
+│   ├── storage.py       # Google Sheets (historial + leads)
+│   ├── extraction.py    # LeadRecord + llamada estructurada al LLM
+│   ├── conversation.py  # Orquestación del flujo conversacional
+│   └── webhook.py       # FastAPI: POST /webhook
+├── tests/
+│   └── __init__.py      # Paquete de tests (Fase 1)
+├── main.py              # Punto de entrada (uvicorn)
+├── requirements.txt
+├── .env.example
+├── .gitignore
+└── README.md
 ```
+
+El **orden de implementación por fases** (qué archivo crear en cada paso) está detallado en `.cursor/docs/plan-implementacion-sinergia-bot-v2.md`. Las Fases 1 y 2 del plan cubren la infraestructura base (`requirements.txt`, `.env.example`, `.gitignore`, `bot/__init__.py`, `tests/__init__.py`) y `bot/logger.py`.
 
 **Principios:**
 - Las dependencias apuntan hacia adentro: `webhook.py` → `conversation.py` → `extraction.py` / `storage.py`. Nunca al revés.
@@ -68,7 +75,7 @@ El historial de cada conversación se persiste en una hoja de Google Sheets llam
 
 1. Lee el historial existente del `chat_id` desde la hoja `conversaciones`.
 2. Añade el mensaje nuevo al historial.
-3. Envía el historial completo al LLM (vía OpenRouter) para generar la respuesta.
+3. Envía el historial completo al LLM (vía la API de OpenAI) para generar la respuesta.
 4. Escribe el historial actualizado de vuelta en la hoja `conversaciones`.
 
 **Extracción de datos del lead — frecuencia configurable:**
@@ -85,9 +92,9 @@ La extracción recibe el historial completo de la conversación y devuelve un JS
 
 La prioridad del MVP es que ningún dato se pierda. Con `EXTRACTION_FREQUENCY=1`, la hoja `leads` siempre refleja el estado más reciente. Si en producción el costo de tokens es alto, se puede cambiar a `2` o `3` sin tocar código.
 
-La extracción usa un **modelo más económico** (`openai/gpt-4o-mini` por defecto, configurable en `LLM_EXTRACTION_MODEL`) para minimizar costos, ya que esta tarea es más simple que la conversación.
+La extracción usa un **modelo más económico** (`gpt-4o-mini` por defecto, configurable en `LLM_EXTRACTION_MODEL`) para minimizar costos, ya que esta tarea es más simple que la conversación.
 
-Con `EXTRACTION_FREQUENCY=1` y una conversación de 30 mensajes, se generan 30 llamadas de extracción con historial creciente. El acumulado aproximado es ~150K tokens de entrada por conversación usando `gpt-4o-mini`. A precio actual de OpenRouter (~$0.15 por 1M tokens de entrada para gpt-4o-mini), esto equivale a ~$0.02 por conversación solo en extracción. Con 30–100 conversaciones semanales, el costo semanal de extracción estaría entre $0.60 y $2.00 USD. Sumando las llamadas conversacionales con `gpt-4o` (~$2.50 por 1M tokens de entrada), el costo total estimado del bot es de $5–$20 USD mensuales en el volumen actual. Estos valores son aproximados y dependen de la longitud real de las conversaciones.
+Con `EXTRACTION_FREQUENCY=1` y una conversación de 30 mensajes, se generan 30 llamadas de extracción con historial creciente. El acumulado aproximado es ~150K tokens de entrada por conversación usando `gpt-4o-mini`. Los costos dependen de la [tabla de precios actual de la API de OpenAI](https://platform.openai.com/docs/pricing) (entrada/salida por modelo). Como referencia orientativa, en el volumen típico del MVP (30–100 conversaciones semanales, mensajes relativamente cortos) el gasto mensual del bot suele situarse en un rango bajo a moderado de USD, pero debe recalcularse con los precios vigentes y la longitud real de cada conversación.
 
 El flujo por mensaje es:
 
@@ -180,21 +187,19 @@ Este patrón garantiza que Telegram siempre recibe un 200 rápido y nunca reinte
 
 ### Configuración del cliente LLM
 
-Los clientes LLM se inicializan en `config.py` usando el SDK oficial de OpenAI apuntando a OpenRouter:
+Los clientes LLM se inicializan en `config.py` usando el SDK oficial de OpenAI contra el endpoint por defecto (`https://api.openai.com/v1`). No hace falta fijar `base_url` salvo que en el futuro se use un proxy o otro proveedor compatible.
 
 ```python
 from openai import OpenAI
 
 # Cliente para conversación (modelo principal)
 llm = OpenAI(
-    api_key=os.environ["OPENROUTER_API_KEY"],
-    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ["OPENAI_API_KEY"],
 )
 
 # Cliente para extracción (modelo económico)
 llm_extraction = OpenAI(
-    api_key=os.environ["OPENROUTER_API_KEY"],
-    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ["OPENAI_API_KEY"],
 )
 ```
 
@@ -203,14 +208,14 @@ Las llamadas especifican el modelo como parámetro:
 ```python
 # Ejemplo de llamada conversacional
 response = llm.chat.completions.create(
-    model=os.environ["LLM_MODEL"],  # ej: "openai/gpt-4o"
+    model=os.environ["LLM_MODEL"],  # ej: "gpt-4o"
     messages=messages,
     temperature=0.7,
 )
 
 # Ejemplo de llamada de extracción con structured output
 response = llm_extraction.chat.completions.create(
-    model=os.environ["LLM_EXTRACTION_MODEL"],  # ej: "openai/gpt-4o-mini"
+    model=os.environ["LLM_EXTRACTION_MODEL"],  # ej: "gpt-4o-mini"
     messages=extraction_messages,
     temperature=0.0,
     response_format={
@@ -348,12 +353,12 @@ Si un dato no fue mencionado, devuelve null para ese campo.
 
 ### Manejo de errores
 
-Cada llamada a un servicio externo (OpenRouter, Google Sheets, Telegram API) debe estar envuelta en un bloque try/except. El patrón es:
+Cada llamada a un servicio externo (API de OpenAI, Google Sheets, Telegram API) debe estar envuelta en un bloque try/except. El patrón es:
 
 | Servicio | Qué puede fallar | Qué hace el bot |
 |---|---|---|
-| **OpenRouter (conversacional)** | Timeout, error de cuota, modelo no disponible | Loguea el error. Envía al usuario: *"Disculpa, tuve un problema y no me muestra los últimos mensajes ¿Puedes repetir por favor?"*. |
-| **OpenRouter (extracción)** | Timeout, JSON malformado, error de cuota | Loguea el error. **No afecta al usuario**: la respuesta conversacional ya se generó. El lead no se actualiza en este turno, pero se actualizará en el siguiente. |
+| **API OpenAI (conversacional)** | Timeout, error de cuota, modelo no disponible | Loguea el error. Envía al usuario: *"Disculpa, tuve un problema y no me muestra los últimos mensajes ¿Puedes repetir por favor?"*. |
+| **API OpenAI (extracción)** | Timeout, JSON malformado, error de cuota | Loguea el error. **No afecta al usuario**: la respuesta conversacional ya se generó. El lead no se actualiza en este turno, pero se actualizará en el siguiente. |
 | **Google Sheets (lectura)** | Timeout, error de red, límite de API | Loguea el error. Envía al usuario: *"Disculpa, tuve un problema de agenda ¿Puedes repetir por favor?"*. |
 | **Google Sheets (escritura)** | Timeout, error de red, límite de API | Loguea el error. La respuesta conversacional ya se envió. Los datos se recuperarán en el siguiente turno porque el historial incluirá este mensaje. |
 | Google Sheets (lectura de estado del lead) | Timeout, error de red, límite de API | Loguea el error. El bot asume que la conversación está en_curso y continúa con el flujo normal. En el peor caso, un usuario con conversación cerrada recibe una respuesta conversacional en lugar del mensaje fijo. |
@@ -437,11 +442,11 @@ Si el cliente solicita agendar pero **no tiene los 3 campos mínimos** (`nombre`
 
 ## 4. Constraints (Restricciones)
 
-- Librerías permitidas: `fastapi`, `uvicorn`, `python-telegram-bot`, `openai`, `gspread`, `google-auth`, `httpx`, `pydantic`, y stdlib de Python. Dependencias de desarrollo: `pytest` y `ruff`. No añadir dependencias fuera de esta lista sin justificación explícita. No añadir dependencias fuera de esta lista sin justificación explícita.
-- Todas las llamadas al LLM pasan a través del cliente `openai` apuntando a OpenRouter.
+- Librerías permitidas: `fastapi`, `uvicorn`, `python-telegram-bot`, `openai`, `gspread`, `google-auth`, `httpx`, `pydantic`, y stdlib de Python. Dependencias de desarrollo: `pytest` y `ruff`. No añadir dependencias fuera de esta lista sin justificación explícita.
+- Todas las llamadas al LLM pasan a través del cliente `openai` hacia la **API de OpenAI** (endpoint por defecto del SDK).
 - Type hints en todas las funciones públicas de los módulos principales.
 - Convenciones PEP 8. Linter: `ruff`.
-- Las credenciales (token de Telegram, OpenRouter API key, Google Service Account JSON, URL de Calendly) deben estar exclusivamente en variables de entorno. Prohibido hardcodear.
+- Las credenciales (token de Telegram, OpenAI API key, Google Service Account JSON, URL de Calendly) deben estar exclusivamente en variables de entorno. Prohibido hardcodear.
 - La hoja `leads` se actualiza (upsert) según la frecuencia configurada en `EXTRACTION_FREQUENCY` (por defecto: cada mensaje). La lógica de upsert nunca sobrescribe un campo que ya tiene valor con `None`.
 - Antes de enviar cada respuesta al usuario, el bot aplica un retraso fijo de 1000 ms para simular tiempo de escritura humano.
 - El historial en la hoja `conversaciones` se actualiza en cada mensaje (lectura + escritura por turno).
@@ -468,7 +473,7 @@ El trabajo se considera terminado cuando:
   - (2) Bot cierra flujo y actualiza estado del lead a `limite_alcanzado` al alcanzar 30 mensajes.
   - (3) Bot envía enlace de Calendly al capturar los 9 campos.
   - (6) La extracción respeta la frecuencia configurada en `EXTRACTION_FREQUENCY` y actualiza la hoja `leads` sin sobrescribir campos existentes con `None`.
-  - (8) Los errores de OpenRouter no dejan al usuario sin respuesta (se envía mensaje de fallback).
+  - (8) Los errores de la API de OpenAI (LLM conversacional) no dejan al usuario sin respuesta (se envía mensaje de fallback).
   - (10) El webhook retorna HTTP 200 inmediatamente y procesa en background.
 - [ ] Existe al menos un test de integración que simula una conversación completa: saludo → captura progresiva de los 9 campos → detección de datos completos → envío de enlace de Calendly → cierre.
 - [ ] El bot responde con el tono definido en el system prompt (cercano, breve, sin parecer bot).
@@ -476,7 +481,7 @@ El trabajo se considera terminado cuando:
 - [ ] El bot no responde en la franja 10 PM – 7 AM hora Colombia, y responde con mensaje de ausencia.
 - [ ] El bot responde con mensaje gentil ante mensajes que no son texto.
 - [ ] El servicio está desplegado en Railway o Render con URL pública y webhook de Telegram apuntando a esa URL.
-- [ ] Variables de entorno configuradas en la plataforma de despliegue (incluyendo `LLM_MODEL`, `LLM_EXTRACTION_MODEL`, `OPENROUTER_API_KEY`, `CALENDLY_URL` y `EXTRACTION_FREQUENCY`).
+- [ ] Variables de entorno configuradas en la plataforma de despliegue (incluyendo `LLM_MODEL`, `LLM_EXTRACTION_MODEL`, `OPENAI_API_KEY`, `CALENDLY_URL` y `EXTRACTION_FREQUENCY`).
 - [ ] El Google Sheet tiene las hojas `leads` y `conversaciones` con los encabezados correctos, y el Service Account tiene permisos de edición sobre el Sheet.
 - [ ] El README del repositorio incluye instrucciones de instalación local, configuración del webhook de Telegram, y tabla de variables de entorno con valores por defecto.
 - [ ] No se introducen dependencias fuera de las listadas en los constraints.
@@ -515,13 +520,21 @@ Configura un logger centralizado usando `logging` de la stdlib de Python. Todos 
 ```python
 import logging
 import os
+import sys
 
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+def _parse_log_level() -> int:
+    raw = os.environ.get("LOG_LEVEL", "INFO")
+    level = getattr(logging, raw.upper(), None)
+    if isinstance(level, int):
+        return level
+    return logging.INFO
 
 logging.basicConfig(
-    level=LOG_LEVEL,
+    level=_parse_log_level(),
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
+    stream=sys.stdout,
+    force=True,
 )
 
 def get_logger(name: str) -> logging.Logger:
@@ -559,7 +572,7 @@ logger = get_logger(__name__)
 | `storage.py` | Lectura de historial | `DEBUG` | `Historial leído: chat_id=12345, turnos=12` |
 | `storage.py` | Upsert de lead | `INFO` | `Lead actualizado: chat_id=12345, campos_con_valor=5/9` |
 | `storage.py` | Error de Google Sheets | `ERROR` | `Error Sheets: operación=upsert_lead, error=...` |
-| `config.py` | Variables de entorno cargadas | `INFO` | `Config cargada: LLM_MODEL=openai/gpt-4o, EXTRACTION_FREQUENCY=1` |
+| `config.py` | Variables de entorno cargadas | `INFO` | `Config cargada: LLM_MODEL=gpt-4o, EXTRACTION_FREQUENCY=1` |
 | `config.py` | Variable de entorno faltante | `CRITICAL` | `Variable faltante: TELEGRAM_BOT_TOKEN` |
 
 ### Reglas de logging
@@ -568,7 +581,7 @@ logger = get_logger(__name__)
 - **Nunca loguear tokens, API keys ni credenciales** en ningún nivel.
 - **Siempre incluir `chat_id`** en los logs para poder rastrear una conversación completa.
 - **El nivel por defecto en producción es `INFO`.** Se cambia a `DEBUG` vía la variable de entorno `LOG_LEVEL` solo para diagnóstico temporal.
-- **Los errores de servicios externos** (OpenRouter, Google Sheets, Telegram) siempre se loguean como `ERROR` con el mensaje de error original (sin stack trace completo en producción, a menos que `LOG_LEVEL=DEBUG`).
+- **Los errores de servicios externos** (API de OpenAI, Google Sheets, Telegram) siempre se loguean como `ERROR` con el mensaje de error original (sin stack trace completo en producción, a menos que `LOG_LEVEL=DEBUG`).
 
 ---
 
@@ -581,10 +594,10 @@ Antes de que el código funcione, hay que configurar cuatro servicios externos:
 - BotFather entrega el `TELEGRAM_BOT_TOKEN`.
 - Una vez el servidor esté desplegado con URL pública, registrar esa URL como webhook con una llamada HTTP a la API de Telegram.
 
-### OpenRouter
-- Crear una cuenta en openrouter.ai.
-- Generar una API Key en la sección de configuración.
-- Asegurarse de que la cuenta tiene créditos disponibles para los modelos configurados.
+### OpenAI
+- Crear o usar una cuenta en [platform.openai.com](https://platform.openai.com).
+- Generar una **API key** en la sección de API keys.
+- Configurar límites de facturación o crédito según tu uso y comprobar que los modelos elegidos (`LLM_MODEL`, `LLM_EXTRACTION_MODEL`) están disponibles para tu proyecto.
 
 ### Google Sheets
 - Crear un Google Sheet con dos hojas: `leads` y `conversaciones`.
@@ -607,12 +620,12 @@ Antes de que el código funcione, hay que configurar cuatro servicios externos:
 | Variable | Descripción | Ejemplo | Requerida |
 |---|---|---|---|
 | `TELEGRAM_BOT_TOKEN` | Token del bot de Telegram (BotFather) | `123456:ABC-DEF...` | Sí |
-| `OPENROUTER_API_KEY` | API Key de OpenRouter | `sk-or-v1-...` | Sí |
+| `OPENAI_API_KEY` | API Key de OpenAI | `sk-...` | Sí |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | JSON del Service Account como string | `{"type":"service_account",...}` | Sí |
 | `GOOGLE_SHEET_ID` | ID del Google Sheet | `1BxiMVs0XRA5nFMdKvBd...` | Sí |
 | `CALENDLY_URL` | URL del evento de Calendly | `https://calendly.com/estudio-sinergia/llamada` | Sí |
-| `LLM_MODEL` | Modelo para conversación (OpenRouter) | `openai/gpt-4o` | Sí |
-| `LLM_EXTRACTION_MODEL` | Modelo para extracción (OpenRouter) | `openai/gpt-4o-mini` | Sí |
+| `LLM_MODEL` | Modelo OpenAI para conversación | `gpt-4o` | Sí |
+| `LLM_EXTRACTION_MODEL` | Modelo OpenAI para extracción | `gpt-4o-mini` | Sí |
 | `EXTRACTION_FREQUENCY` | Cada cuántos mensajes del usuario se ejecuta la extracción | `1` | No (default: `1`) |
 | `LOG_LEVEL` | Nivel de logging | `INFO` | No (default: `INFO`) |
 | `PORT` | Puerto del servidor (inyectado por Railway/Render) | `8080` | No (default: `8000`) |
@@ -684,3 +697,9 @@ bot/logger.py  ← importado por todos los módulos
 | 8 | Mensajes editados (`edited_message`) procesados como mensajes nuevos | Permite al usuario corregir datos. Antes se ignoraban silenciosamente. |
 | 9 | Extracción desde cero y la intervención manual de Alejandro documentadas como fuera del alcance | Transparencia sobre limitaciones aceptadas del MVP. |
 | 10 | Eliminada la sección de agentes de Cursor (QA y Code Reviewer) | Prematura para un MVP sin código. Los criterios de calidad están cubiertos por el DoD. |
+
+### Actualización post v4 (proveedor LLM)
+
+| # | Cambio | Motivo |
+|---|---|---|
+| 1 | OpenRouter → **API de OpenAI** (`OPENAI_API_KEY`, modelos `gpt-4o` / `gpt-4o-mini`, endpoint por defecto del SDK) | Alinear documentación y pruebas con la clave disponible en el proyecto; misma arquitectura y SDK `openai`. |
