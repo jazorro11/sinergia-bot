@@ -116,17 +116,24 @@ def _message_ask_missing_minimum(merged: dict[str, str]) -> str:
     missing = [k for k in _MIN_CALENDLY_KEYS if not merged.get(k, "").strip()]
     phrases = [_MISSING_MIN_LABELS[k] for k in missing]
     if not phrases:
-        return "Para mandarte el enlace me falta un dato más, ¿me lo compartes?"
+        return (
+            "Para pasarte el enlace de la videollamada me falta un dato, "
+            "¿me lo compartes por favor? Gracias"
+        )
     if len(phrases) == 1:
         pr = _MISSING_MIN_PRONOUN[missing[0]]
-        return f"Para el enlace necesito {phrases[0]}, ¿me {pr} compartes?"
+        return (
+            f"Para pasarte el enlace necesito {phrases[0]} por favor, "
+            f"¿me {pr} compartes? Gracias"
+        )
     if len(phrases) == 2:
         return (
-            f"Para el enlace me faltan {phrases[0]} y {phrases[1]}, ¿me los compartes?"
+            f"Para pasarte el enlace me faltan {phrases[0]} y {phrases[1]} por favor, "
+            "¿me los compartes? Gracias"
         )
     return (
-        f"Para el enlace me faltan {phrases[0]}, {phrases[1]} y {phrases[2]}, "
-        "¿me los compartes?"
+        f"Para pasarte el enlace me faltan {phrases[0]}, {phrases[1]} y {phrases[2]} "
+        "por favor, ¿me los compartes? Gracias"
     )
 
 
@@ -140,6 +147,38 @@ def _strip_calendly_from_text(text: str) -> str:
     t = t.replace(config.CALENDLY_URL, "").strip()
     t = re.sub(r"\[\s*\]\(\s*\)", "", t)
     t = re.sub(r"\s{2,}", " ", t).strip()
+    return t
+
+
+# Colas de texto que el LLM añade antes del URL; si el cierre está bloqueado, no debe quedar colgando.
+_CALENDLY_TEASER_TAIL: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\s*cuando quieras agenda acá\s*:?\s*\Z", re.IGNORECASE | re.DOTALL),
+    re.compile(
+        r"\s*te dejo mi enlace para que agendes cuando te quede bien\s*:?\s*\Z",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(r"\s*te dejo (el |mi )?enlace\s*:?\s*\Z", re.IGNORECASE | re.DOTALL),
+    re.compile(r"\s*te paso (el )?enlace\s*:?\s*\Z", re.IGNORECASE | re.DOTALL),
+    re.compile(r"\s*te comparto (el )?enlace\s*:?\s*\Z", re.IGNORECASE | re.DOTALL),
+    re.compile(
+        r"\s*aquí (tienes |está )?(el )?enlace\s*:?\s*\Z", re.IGNORECASE | re.DOTALL
+    ),
+    re.compile(
+        r"\s*este es (el )?enlace\s*:?\s*\Z", re.IGNORECASE | re.DOTALL
+    ),
+)
+
+
+def _remove_dangling_calendly_teasers(text: str) -> str:
+    """Evita 'agenda acá:' o 'te dejo el enlace:' sin URL cuando el envío de Calendly está bloqueado."""
+    t = text.strip()
+    while True:
+        prev = t
+        for pat in _CALENDLY_TEASER_TAIL:
+            t = pat.sub("", t).strip()
+        t = re.sub(r"\s*:\s*\Z", "", t).strip()
+        if t == prev:
+            break
     return t
 
 
@@ -321,7 +360,9 @@ def process_message(
         rec_close = extraction.extract_lead_data(full_history, cid)
         merged = _merge_lead_for_gate(existing_lead, rec_close)
         if not _can_close_with_calendly(merged):
-            stripped = _strip_calendly_from_text(assistant_text)
+            stripped = _remove_dangling_calendly_teasers(
+                _strip_calendly_from_text(assistant_text)
+            )
             ask = _message_ask_missing_minimum(merged)
             assistant_text = f"{stripped}\n\n{ask}".strip() if stripped else ask
             logger.info(

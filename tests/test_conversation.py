@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bot import config
-from bot.conversation import process_message
+from bot.conversation import _remove_dangling_calendly_teasers, process_message
 from bot.extraction import LeadRecord
 from bot.storage import LEADS_HEADERS, upsert_lead
 
@@ -162,6 +162,48 @@ def test_calendly_blocked_strips_markdown_link_without_empty_brackets(
     assert not any(
         c.kwargs.get("estado") == "calendly_enviado"
         for c in mock_upsert.call_args_list
+    )
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.storage.mark_conversation_closed")
+@patch("bot.conversation.storage.upsert_lead")
+@patch("bot.conversation.extraction.extract_lead_data")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_calendly_blocked_removes_agenda_aca_without_url(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_llm: MagicMock,
+    mock_extract: MagicMock,
+    mock_upsert: MagicMock,
+    mock_mark_closed: MagicMock,
+    _save: MagicMock,
+) -> None:
+    """No debe quedar 'Cuando quieras agenda acá:' si el enlace está bloqueado por mínimos."""
+    u = config.CALENDLY_URL
+    mock_get_lead.return_value = None
+    mock_get_history.return_value = []
+    mock_llm.return_value = _conv_completion(
+        f"Sí, ofrecemos diseño personalizado con la línea plus. "
+        f"¿Te gustaría agendar una videollamada? Cuando quieras agenda acá:\n\n[{u}]({u})"
+    )
+    mock_extract.return_value = LeadRecord(nombre="SoloNombre")
+    out = process_message(1, 1, "hola", 1, False)
+    assert config.CALENDLY_URL not in out
+    assert "agenda acá" not in out.lower()
+    assert "cuando quieras" not in out.lower()
+    assert "por favor" in out.lower()
+    mock_mark_closed.assert_not_called()
+
+
+def test_remove_dangling_calendly_teasers_strips_known_tails() -> None:
+    assert "agenda" not in _remove_dangling_calendly_teasers(
+        "Diseño plus te puede servir. Cuando quieras agenda acá:"
+    ).lower()
+    assert not _remove_dangling_calendly_teasers("Solo: Cuando quieras agenda acá:").endswith(
+        ":"
     )
 
 
