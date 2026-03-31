@@ -208,6 +208,18 @@ _CALENDLY_TEASER_TAIL: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"\s*este es (el )?enlace\s*:?\s*\Z", re.IGNORECASE | re.DOTALL
     ),
+    re.compile(
+        r"\s*a través de (este |el )?enlace\s*:?\s*\Z",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"\s*puedes agendar una (videollamada|llamada)[^:]{0,200}:\s*\Z",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"\s*agendar (una )?(videollamada|llamada)[^:]{0,200}(aquí|acá)\s*:?\s*\Z",
+        re.IGNORECASE | re.DOTALL,
+    ),
 )
 
 
@@ -221,6 +233,33 @@ def _remove_dangling_calendly_teasers(text: str) -> str:
         t = re.sub(r"\s*:\s*\Z", "", t).strip()
         if t == prev:
             break
+    # Frase intermedia "… a través de este enlace: …" (no solo al final del mensaje).
+    t = re.sub(
+        r"\s*a través de (este |el )?enlace\s*:?\s*",
+        " ",
+        t,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    t = re.sub(
+        r"\s+puedes agendar una (videollamada|llamada)[^:]{0,400}:\s*",
+        " ",
+        t,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    # Cola "… enlace" o "… aquí" sin dos puntos (p. ej. tras quitar solo ":" en bucle anterior)
+    t = re.sub(
+        r"\s+a través de (este |el )?enlace\s*\Z",
+        "",
+        t,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    t = re.sub(
+        r"\s+puedes agendar una (videollamada|llamada)\s*\Z",
+        "",
+        t,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
     return t
 
 
@@ -303,10 +342,10 @@ def process_message(
         return config.MSG_FALLBACK_SHEETS_HISTORY
 
     est = str(existing_lead.get("estado", "")).strip() if existing_lead else ""
-    closed_calendly_like = est in ("calendly_enviado", "limite_alcanzado") or (
-        existing_lead is None
-        and _history_last_assistant_had_calendly(history, config.CALENDLY_URL)
-    )
+    closed_calendly_like = est in (
+        "calendly_enviado",
+        "limite_alcanzado",
+    ) or _history_last_assistant_had_calendly(history, config.CALENDLY_URL)
 
     if closed_calendly_like:
         if _post_calendly_farewell_allowed(

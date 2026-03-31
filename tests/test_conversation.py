@@ -10,6 +10,7 @@ import pytest
 
 from bot import config
 from bot.conversation import _remove_dangling_calendly_teasers, process_message
+from bot.prompts import SYSTEM_PROMPT_POST_CALENDLY_FAREWELL
 from bot.extraction import LeadRecord
 from bot.storage import LEADS_HEADERS, upsert_lead
 
@@ -199,6 +200,38 @@ def test_calendly_blocked_removes_agenda_aca_without_url(
 
 
 @patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.storage.mark_conversation_closed")
+@patch("bot.conversation.storage.upsert_lead")
+@patch("bot.conversation.extraction.extract_lead_data")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_calendly_blocked_removes_a_traves_enlace_without_url(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_llm: MagicMock,
+    mock_extract: MagicMock,
+    mock_upsert: MagicMock,
+    mock_mark_closed: MagicMock,
+    _save: MagicMock,
+) -> None:
+    """Sin mínimos, no debe quedar 'a través de este enlace:' ni 'agendar una llamada aquí:'."""
+    u = config.CALENDLY_URL
+    mock_get_lead.return_value = None
+    mock_get_history.return_value = []
+    mock_llm.return_value = _conv_completion(
+        f"Genial, me alegra que te interese. Puedes agendar una videollamada en el momento "
+        f"que mejor te convenga a través de este enlace: {u}\n\n"
+        f"Para pasarte el enlace necesito tu nombre por favor, ¿me lo compartes? Gracias"
+    )
+    mock_extract.return_value = LeadRecord(ciudad="Bogotá", area_aprox="192")
+    out = process_message(1, 1, "sí agendar", 1, False)
+    assert config.CALENDLY_URL not in out
+    assert "a través de" not in out.lower()
+    mock_mark_closed.assert_not_called()
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
 @patch("bot.conversation.storage.get_conversation_history")
 @patch("bot.conversation.storage.get_lead")
 @patch("bot.conversation.config.llm.chat.completions.create")
@@ -257,6 +290,12 @@ def test_remove_dangling_calendly_teasers_strips_known_tails() -> None:
     assert not _remove_dangling_calendly_teasers("Solo: Cuando quieras agenda acá:").endswith(
         ":"
     )
+    assert "enlace" not in _remove_dangling_calendly_teasers(
+        "Puedes agendar cuando quieras a través de este enlace:"
+    ).lower()
+    assert "aquí" not in _remove_dangling_calendly_teasers(
+        "Cuando quieras, puedes agendar una llamada aquí:"
+    ).lower()
 
 
 @patch("bot.conversation.storage.save_conversation_turn")
@@ -411,6 +450,30 @@ def test_post_calendly_farewell_inferred_close_without_lead_row(
     out = process_message(9, 9, "listo gracias", 102, False)
     mock_llm.assert_called_once()
     assert out == "Perfecto, hablamos pronto"
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_post_calendly_farewell_when_lead_en_curso_but_history_has_calendly_url(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_llm: MagicMock,
+    _save: MagicMock,
+) -> None:
+    """Si Sheets tiene estado desactualizado pero el último turno ya incluyó Calendly, no reabrir flujo principal."""
+    mock_get_lead.return_value = {"estado": "en_curso", "chat_id": "99", "nombre": "Jesús"}
+    mock_get_history.return_value = [
+        {"role": "user", "content": "hola"},
+        {"role": "assistant", "content": f"Aquí el enlace {config.CALENDLY_URL}"},
+    ]
+    mock_llm.return_value = _conv_completion("De acuerdo, cualquier cosa me escribes")
+    out = process_message(99, 1, "repito el plazo en 11 semanas", 200, False)
+    mock_llm.assert_called_once()
+    msgs = mock_llm.call_args.kwargs["messages"]
+    assert msgs[0]["content"] == SYSTEM_PROMPT_POST_CALENDLY_FAREWELL
+    assert out == "De acuerdo, cualquier cosa me escribes"
 
 
 @patch("bot.conversation.storage.save_conversation_turn")
