@@ -9,7 +9,7 @@ from typing import Any
 
 from bot import config, extraction, storage
 from bot.logger import get_logger
-from bot.prompts import SYSTEM_PROMPT
+from bot.prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_POST_CALENDLY_FAREWELL
 
 logger = get_logger(__name__)
 
@@ -147,6 +147,40 @@ def _history_last_assistant_had_calendly(
     return False
 
 
+def _index_last_assistant_with_calendly(
+    history: list[dict[str, Any]], url: str
+) -> int | None:
+    for i in range(len(history) - 1, -1, -1):
+        m = history[i]
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content")
+        if content is not None and url in str(content):
+            return i
+    return None
+
+
+def _count_user_messages_after_index(history: list[dict[str, Any]], idx: int) -> int:
+    return sum(
+        1
+        for j in range(idx + 1, len(history))
+        if history[j].get("role") == "user"
+    )
+
+
+def _post_calendly_farewell_allowed(
+    history: list[dict[str, Any]], url: str, limit: int
+) -> bool:
+    if limit <= 0:
+        return False
+    cal_idx = _index_last_assistant_with_calendly(history, url)
+    if cal_idx is None:
+        return False
+    users_after = _count_user_messages_after_index(history, cal_idx)
+    effective = users_after + 1
+    return effective <= limit
+
+
 def process_message(
     chat_id: str | int,
     user_id: str | int,
@@ -170,11 +204,6 @@ def process_message(
 
     if existing_lead:
         est = str(existing_lead.get("estado", "")).strip()
-        if est in ("calendly_enviado", "limite_alcanzado"):
-            logger.info("Conversación cerrada, mensaje fijo: chat_id=%s", cid)
-            return config.MSG_CLOSED_CALENDLY_OR_LIMIT_TEMPLATE.format(
-                calendly_url=config.CALENDLY_URL
-            )
         if est == "no_agendar":
             logger.info("Conversación cerrada, mensaje fijo: chat_id=%s", cid)
             return config.MSG_CLOSED_NO_AGENDAR
@@ -185,13 +214,51 @@ def process_message(
         logger.exception("Error leyendo historial: chat_id=%s", cid)
         return config.MSG_FALLBACK_SHEETS_HISTORY
 
-    if existing_lead is None and _history_last_assistant_had_calendly(
-        history, config.CALENDLY_URL
-    ):
-        logger.info(
-            "Cierre inferido por historial (Calendly en último assistant): chat_id=%s",
-            cid,
-        )
+    est = str(existing_lead.get("estado", "")).strip() if existing_lead else ""
+    closed_calendly_like = est in ("calendly_enviado", "limite_alcanzado") or (
+        existing_lead is None
+        and _history_last_assistant_had_calendly(history, config.CALENDLY_URL)
+    )
+
+    if closed_calendly_like:
+        if _post_calendly_farewell_allowed(
+            history,
+            config.CALENDLY_URL,
+            config.POST_CALENDLY_FAREWELL_USER_MESSAGES,
+        ):
+            logger.info("Despedida post-Calendly (LLM): chat_id=%s", cid)
+            hist_norm: list[dict[str, str]] = [
+                {"role": str(m["role"]), "content": str(m["content"])}
+                for m in history
+            ]
+            messages_fw: list[dict[str, str]] = [
+                {"role": "system", "content": SYSTEM_PROMPT_POST_CALENDLY_FAREWELL},
+                *hist_norm,
+                {"role": "user", "content": text},
+            ]
+            try:
+                response = config.llm.chat.completions.create(
+                    model=config.LLM_MODEL,
+                    messages=messages_fw,
+                    temperature=0.7,
+                )
+                raw_fw = response.choices[0].message.content
+                if raw_fw is None or not str(raw_fw).strip():
+                    logger.error("LLM despedida: respuesta vacía chat_id=%s", cid)
+                    assistant_text = config.MSG_FALLBACK_LLM
+                else:
+                    assistant_text = _strip_calendly_from_text(str(raw_fw).strip())
+            except Exception:
+                logger.exception("LLM despedida falló: chat_id=%s", cid)
+                assistant_text = config.MSG_FALLBACK_LLM
+
+            storage.save_conversation_turn(cid, "user", text, timestamp, "cerrada")
+            storage.save_conversation_turn(
+                cid, "assistant", assistant_text, int(time.time()), "cerrada"
+            )
+            return assistant_text
+
+        logger.info("Conversación cerrada, mensaje fijo: chat_id=%s", cid)
         return config.MSG_CLOSED_CALENDLY_OR_LIMIT_TEMPLATE.format(
             calendly_url=config.CALENDLY_URL
         )

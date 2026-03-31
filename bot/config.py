@@ -60,6 +60,23 @@ def _parse_port() -> int:
         sys.exit(1)
 
 
+def _parse_post_calendly_farewell_user_messages() -> int:
+    raw = os.environ.get("POST_CALENDLY_FAREWELL_USER_MESSAGES", "2").strip()
+    try:
+        n = int(raw)
+    except ValueError:
+        logger.critical(
+            "POST_CALENDLY_FAREWELL_USER_MESSAGES must be an integer, got: %r", raw
+        )
+        sys.exit(1)
+    if n < 0:
+        logger.critical(
+            "POST_CALENDLY_FAREWELL_USER_MESSAGES must be >= 0, got: %s", n
+        )
+        sys.exit(1)
+    return n
+
+
 # --- Required ---
 TELEGRAM_BOT_TOKEN = _require_str("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = _require_str("OPENAI_API_KEY")
@@ -74,6 +91,7 @@ LLM_EXTRACTION_MODEL = _require_str("LLM_EXTRACTION_MODEL")
 # --- Optional ---
 EXTRACTION_FREQUENCY = _parse_extraction_frequency()
 PORT = _parse_port()
+POST_CALENDLY_FAREWELL_USER_MESSAGES = _parse_post_calendly_farewell_user_messages()
 
 # --- OpenAI (default API host; no base_url) ---
 llm = OpenAI(api_key=OPENAI_API_KEY)
@@ -107,8 +125,10 @@ MSG_FALLBACK_LLM = (
 )
 
 logger.info(
-    "Config loaded: LLM_MODEL=%s LLM_EXTRACTION_MODEL=%s EXTRACTION_FREQUENCY=%s",
+    "Config loaded: LLM_MODEL=%s LLM_EXTRACTION_MODEL=%s EXTRACTION_FREQUENCY=%s "
+    "POST_CALENDLY_FAREWELL_USER_MESSAGES=%s",
     LLM_MODEL,
     LLM_EXTRACTION_MODEL,
     EXTRACTION_FREQUENCY,
+    POST_CALENDLY_FAREWELL_USER_MESSAGES,
 )
