@@ -92,7 +92,7 @@ def test_conversation_full_progression_calendly_close() -> None:
         c: str,
         lead_record: dict[str, Any],
         estado: str | None = None,
-    ) -> None:
+    ) -> bool:
         c = str(c).strip()
         if c not in leads:
             leads[c] = {k: None for k in LEAD_DATA_KEYS}
@@ -107,6 +107,7 @@ def test_conversation_full_progression_calendly_close() -> None:
                 row[k] = str(inc).strip()
         if estado is not None:
             row["estado"] = estado
+        return True
 
     def mark_conversation_closed(c: str) -> None:
         nonlocal mark_closed_count

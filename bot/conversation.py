@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime
 from typing import Any
@@ -16,6 +17,18 @@ logger = get_logger(__name__)
 _MSG_USER_LIMIT_FAREWELL = (
     "Llegamos al límite de mensajes en esta conversación. Para agendar con Alejandro usa este enlace: "
     "{calendly_url}. Si no agendas ahora, él se pondrá en contacto contigo pronto."
+)
+
+# Cierre con Calendly: 9 campos completos o los tres mínimos del brief.
+_MIN_CALENDLY_KEYS = ("nombre", "ciudad", "area_aprox")
+_MISSING_MIN_LABELS: dict[str, str] = {
+    "nombre": "tu nombre",
+    "ciudad": "la ciudad o municipio del proyecto",
+    "area_aprox": "el área aproximada en m²",
+}
+_MSG_UPSERT_FAILED = (
+    "No pude guardar tus datos en este momento (fallo técnico). "
+    "¿Me escribes de nuevo en unos minutos? Cuando funcione te paso el enlace para agendar."
 )
 
 
@@ -63,6 +76,77 @@ def _lead_mapping_from_row(lead: dict[str, Any]) -> dict[str, str | None]:
     return out
 
 
+def _merge_lead_for_gate(
+    existing: dict[str, Any] | None,
+    rec: extraction.LeadRecord | None,
+) -> dict[str, str]:
+    """Unión extracción + fila en Sheets: prioriza valor nuevo de extracción si existe."""
+    merged: dict[str, str] = {}
+    for k in storage.LEAD_DATA_KEYS:
+        from_sheet = ""
+        if existing:
+            v = existing.get(k)
+            if v is not None and str(v).strip():
+                from_sheet = str(v).strip()
+        from_ext = ""
+        if rec is not None:
+            raw = rec.model_dump().get(k)
+            if raw is not None and str(raw).strip():
+                from_ext = str(raw).strip()
+        merged[k] = from_ext or from_sheet
+    return merged
+
+
+def _merged_to_lead_payload(merged: dict[str, str]) -> dict[str, str | None]:
+    return {k: (v if (v := merged.get(k, "").strip()) else None) for k in storage.LEAD_DATA_KEYS}
+
+
+def _can_close_with_calendly(merged: dict[str, str]) -> bool:
+    if all(merged.get(k, "").strip() for k in storage.LEAD_DATA_KEYS):
+        return True
+    return all(merged.get(k, "").strip() for k in _MIN_CALENDLY_KEYS)
+
+
+def _missing_minimum_phrases(merged: dict[str, str]) -> list[str]:
+    return [
+        _MISSING_MIN_LABELS[k]
+        for k in _MIN_CALENDLY_KEYS
+        if not merged.get(k, "").strip()
+    ]
+
+
+def _message_ask_missing_minimum(phrases: list[str]) -> str:
+    if not phrases:
+        return "Antes del enlace necesito un dato más. ¿Me lo compartes?"
+    if len(phrases) == 1:
+        return f"Antes de pasarte el enlace necesito {phrases[0]}. ¿Me lo compartes?"
+    if len(phrases) == 2:
+        return (
+            f"Antes del enlace me faltan {phrases[0]} y {phrases[1]}. ¿Me los compartes?"
+        )
+    return (
+        f"Antes del enlace me faltan {phrases[0]}, {phrases[1]} y {phrases[2]}. "
+        "¿Me los compartes?"
+    )
+
+
+def _strip_calendly_from_text(text: str) -> str:
+    t = text.replace(config.CALENDLY_URL, "").strip()
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    return t
+
+
+def _history_last_assistant_had_calendly(
+    history: list[dict[str, Any]], url: str
+) -> bool:
+    for m in reversed(history):
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content")
+        return content is not None and url in str(content)
+    return False
+
+
 def process_message(
     chat_id: str | int,
     user_id: str | int,
@@ -78,14 +162,14 @@ def process_message(
         logger.info("Silencio nocturno: chat_id=%s", cid)
         return config.MSG_SILENCE_ABSENCE
 
-    lead_closed: dict[str, Any] | None = None
+    existing_lead: dict[str, Any] | None = None
     try:
-        lead_closed = storage.get_lead(cid)
+        existing_lead = storage.get_lead(cid)
     except Exception:
         logger.exception("Error get_lead (asumiendo en_curso): chat_id=%s", cid)
 
-    if lead_closed:
-        est = str(lead_closed.get("estado", "")).strip()
+    if existing_lead:
+        est = str(existing_lead.get("estado", "")).strip()
         if est in ("calendly_enviado", "limite_alcanzado"):
             logger.info("Conversación cerrada, mensaje fijo: chat_id=%s", cid)
             return config.MSG_CLOSED_CALENDLY_OR_LIMIT_TEMPLATE.format(
@@ -101,12 +185,26 @@ def process_message(
         logger.exception("Error leyendo historial: chat_id=%s", cid)
         return config.MSG_FALLBACK_SHEETS_HISTORY
 
+    if existing_lead is None and _history_last_assistant_had_calendly(
+        history, config.CALENDLY_URL
+    ):
+        logger.info(
+            "Cierre inferido por historial (Calendly en último assistant): chat_id=%s",
+            cid,
+        )
+        return config.MSG_CLOSED_CALENDLY_OR_LIMIT_TEMPLATE.format(
+            calendly_url=config.CALENDLY_URL
+        )
+
     user_count_in_sheet = count_user_messages(history)
     if user_count_in_sheet >= config.USER_MESSAGE_LIMIT:
         final = extraction.extract_lead_data(history, cid)
-        storage.upsert_lead(
+        ok_limit = storage.upsert_lead(
             cid, final.model_dump() if final else {}, estado="limite_alcanzado"
         )
+        if not ok_limit:
+            logger.error("Límite: upsert falló, chat_id=%s", cid)
+            return _MSG_UPSERT_FAILED
         storage.mark_conversation_closed(cid)
         logger.warning(
             "Límite alcanzado: chat_id=%s, mensajes=%s",
@@ -146,13 +244,35 @@ def process_message(
 
     closed_via_calendly_in_response = False
     if config.CALENDLY_URL in assistant_text:
-        rec = extraction.extract_lead_data(full_history, cid)
-        storage.upsert_lead(
-            cid, rec.model_dump() if rec else {}, estado="calendly_enviado"
-        )
-        storage.mark_conversation_closed(cid)
-        logger.info("Calendly detectado en respuesta LLM: chat_id=%s", cid)
-        closed_via_calendly_in_response = True
+        rec_close = extraction.extract_lead_data(full_history, cid)
+        merged = _merge_lead_for_gate(existing_lead, rec_close)
+        if not _can_close_with_calendly(merged):
+            stripped = _strip_calendly_from_text(assistant_text)
+            ask = _message_ask_missing_minimum(_missing_minimum_phrases(merged))
+            assistant_text = f"{stripped}\n\n{ask}".strip() if stripped else ask
+            logger.info(
+                "Calendly en respuesta bloqueado (faltan mínimos o 9 campos): chat_id=%s",
+                cid,
+            )
+        else:
+            payload = _merged_to_lead_payload(merged)
+            ok_cal = storage.upsert_lead(
+                cid, payload, estado="calendly_enviado"
+            )
+            if ok_cal:
+                storage.mark_conversation_closed(cid)
+                logger.info("Calendly detectado en respuesta LLM: chat_id=%s", cid)
+                closed_via_calendly_in_response = True
+            else:
+                assistant_text = _strip_calendly_from_text(assistant_text)
+                assistant_text = (
+                    f"{assistant_text}\n\n{_MSG_UPSERT_FAILED}".strip()
+                    if assistant_text
+                    else _MSG_UPSERT_FAILED
+                )
+                logger.error(
+                    "Calendly: upsert falló, no se cierra conversación: chat_id=%s", cid
+                )
 
     periodic_extraction_done = False
     if not closed_via_calendly_in_response:
@@ -161,7 +281,7 @@ def process_message(
             periodic_extraction_done = True
             rec_p = extraction.extract_lead_data(full_history, cid)
             if rec_p is not None:
-                storage.upsert_lead(cid, rec_p.model_dump())
+                _ = storage.upsert_lead(cid, rec_p.model_dump())
         else:
             logger.debug(
                 "Extracción periódica no aplica: chat_id=%s user_total=%s frecuencia=%s",
@@ -178,12 +298,17 @@ def process_message(
             logger.exception("Error get_lead post-extracción: chat_id=%s", cid)
             lead_after = None
         if lead_after and _lead_row_complete(lead_after):
-            storage.upsert_lead(
+            ok_complete = storage.upsert_lead(
                 cid, _lead_mapping_from_row(lead_after), estado="calendly_enviado"
             )
-            storage.mark_conversation_closed(cid)
-            logger.info("Calendly enviado: chat_id=%s, campos_completos=9/9", cid)
-            conversation_closed = True
+            if ok_complete:
+                storage.mark_conversation_closed(cid)
+                logger.info("Calendly enviado: chat_id=%s, campos_completos=9/9", cid)
+                conversation_closed = True
+            else:
+                logger.error(
+                    "Cierre 9/9: upsert falló, chat_id=%s", cid
+                )
 
     estado_turno = "cerrada" if conversation_closed else "en_curso"
     storage.save_conversation_turn(cid, "user", text, timestamp, estado_turno)

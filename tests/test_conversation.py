@@ -87,13 +87,47 @@ def test_calendly_in_assistant_response_closes_once(
     mock_llm.return_value = _conv_completion(
         f"Listo, agenda aquí: {config.CALENDLY_URL}"
     )
-    mock_extract.return_value = LeadRecord(nombre="N")
+    mock_extract.return_value = LeadRecord(
+        nombre="N", ciudad="Bogotá", area_aprox="80"
+    )
+    mock_upsert.return_value = True
     out = process_message(42, 7, "quiero agendar", 999, False)
     assert config.CALENDLY_URL in out
     mock_extract.assert_called_once()
     mock_upsert.assert_called_once()
     assert mock_upsert.call_args.kwargs["estado"] == "calendly_enviado"
     mock_mark_closed.assert_called_once()
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.storage.mark_conversation_closed")
+@patch("bot.conversation.storage.upsert_lead")
+@patch("bot.conversation.extraction.extract_lead_data")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_calendly_blocked_when_minimum_fields_missing(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_llm: MagicMock,
+    mock_extract: MagicMock,
+    mock_upsert: MagicMock,
+    mock_mark_closed: MagicMock,
+    _save: MagicMock,
+) -> None:
+    mock_get_lead.return_value = None
+    mock_get_history.return_value = []
+    mock_llm.return_value = _conv_completion(
+        f"Listo: {config.CALENDLY_URL}"
+    )
+    mock_extract.return_value = LeadRecord(nombre="SoloNombre")
+    out = process_message(1, 1, "agendar ya", 1, False)
+    assert config.CALENDLY_URL not in out
+    mock_mark_closed.assert_not_called()
+    assert not any(
+        c.kwargs.get("estado") == "calendly_enviado"
+        for c in mock_upsert.call_args_list
+    )
 
 
 @patch("bot.conversation.storage.save_conversation_turn")
@@ -145,7 +179,7 @@ def test_upsert_lead_does_not_overwrite_existing_with_none(
     ws = MagicMock()
     ws.get_all_values.return_value = [headers, row]
     mock_worksheet.return_value = ws
-    upsert_lead(
+    assert upsert_lead(
         "7",
         {"nombre": None, "ciudad": "Bogotá"},
         estado=None,
