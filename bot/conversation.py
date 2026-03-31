@@ -26,6 +26,11 @@ _MISSING_MIN_LABELS: dict[str, str] = {
     "ciudad": "la ciudad o municipio del proyecto",
     "area_aprox": "el área aproximada en m²",
 }
+_MISSING_MIN_PRONOUN: dict[str, str] = {
+    "nombre": "lo",
+    "ciudad": "la",
+    "area_aprox": "la",
+}
 _MSG_UPSERT_FAILED = (
     "No pude guardar tus datos en este momento (fallo técnico). "
     "¿Me escribes de nuevo en unos minutos? Cuando funcione te paso el enlace para agendar."
@@ -107,31 +112,33 @@ def _can_close_with_calendly(merged: dict[str, str]) -> bool:
     return all(merged.get(k, "").strip() for k in _MIN_CALENDLY_KEYS)
 
 
-def _missing_minimum_phrases(merged: dict[str, str]) -> list[str]:
-    return [
-        _MISSING_MIN_LABELS[k]
-        for k in _MIN_CALENDLY_KEYS
-        if not merged.get(k, "").strip()
-    ]
-
-
-def _message_ask_missing_minimum(phrases: list[str]) -> str:
+def _message_ask_missing_minimum(merged: dict[str, str]) -> str:
+    missing = [k for k in _MIN_CALENDLY_KEYS if not merged.get(k, "").strip()]
+    phrases = [_MISSING_MIN_LABELS[k] for k in missing]
     if not phrases:
-        return "Antes del enlace necesito un dato más. ¿Me lo compartes?"
+        return "Para mandarte el enlace me falta un dato más, ¿me lo compartes?"
     if len(phrases) == 1:
-        return f"Antes de pasarte el enlace necesito {phrases[0]}. ¿Me lo compartes?"
+        pr = _MISSING_MIN_PRONOUN[missing[0]]
+        return f"Para el enlace necesito {phrases[0]}, ¿me {pr} compartes?"
     if len(phrases) == 2:
         return (
-            f"Antes del enlace me faltan {phrases[0]} y {phrases[1]}. ¿Me los compartes?"
+            f"Para el enlace me faltan {phrases[0]} y {phrases[1]}, ¿me los compartes?"
         )
     return (
-        f"Antes del enlace me faltan {phrases[0]}, {phrases[1]} y {phrases[2]}. "
-        "¿Me los compartes?"
+        f"Para el enlace me faltan {phrases[0]}, {phrases[1]} y {phrases[2]}, "
+        "¿me los compartes?"
     )
 
 
 def _strip_calendly_from_text(text: str) -> str:
-    t = text.replace(config.CALENDLY_URL, "").strip()
+    """Quita la URL de Calendly y restos Markdown (evita []() si el LLM usó [url](url))."""
+    esc = re.escape(config.CALENDLY_URL)
+    md_link = re.compile(rf"\[[^\]]*\]\(\s*{esc}\s*\)")
+    t = text
+    while md_link.search(t):
+        t = md_link.sub("", t)
+    t = t.replace(config.CALENDLY_URL, "").strip()
+    t = re.sub(r"\[\s*\]\(\s*\)", "", t)
     t = re.sub(r"\s{2,}", " ", t).strip()
     return t
 
@@ -315,7 +322,7 @@ def process_message(
         merged = _merge_lead_for_gate(existing_lead, rec_close)
         if not _can_close_with_calendly(merged):
             stripped = _strip_calendly_from_text(assistant_text)
-            ask = _message_ask_missing_minimum(_missing_minimum_phrases(merged))
+            ask = _message_ask_missing_minimum(merged)
             assistant_text = f"{stripped}\n\n{ask}".strip() if stripped else ask
             logger.info(
                 "Calendly en respuesta bloqueado (faltan mínimos o 9 campos): chat_id=%s",

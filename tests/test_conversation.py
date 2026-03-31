@@ -131,6 +131,41 @@ def test_calendly_blocked_when_minimum_fields_missing(
 
 
 @patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.storage.mark_conversation_closed")
+@patch("bot.conversation.storage.upsert_lead")
+@patch("bot.conversation.extraction.extract_lead_data")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_calendly_blocked_strips_markdown_link_without_empty_brackets(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_llm: MagicMock,
+    mock_extract: MagicMock,
+    mock_upsert: MagicMock,
+    mock_mark_closed: MagicMock,
+    _save: MagicMock,
+) -> None:
+    """Si el LLM usa [url](url) y faltan mínimos, no debe quedar []() al quitar Calendly."""
+    u = config.CALENDLY_URL
+    mock_get_lead.return_value = None
+    mock_get_history.return_value = []
+    mock_llm.return_value = _conv_completion(
+        f"Te dejo el enlace: [{u}]({u})"
+    )
+    mock_extract.return_value = LeadRecord(nombre="SoloNombre")
+    out = process_message(1, 1, "agendar ya", 1, False)
+    assert config.CALENDLY_URL not in out
+    assert "[]()" not in out
+    assert "[] (" not in out
+    mock_mark_closed.assert_not_called()
+    assert not any(
+        c.kwargs.get("estado") == "calendly_enviado"
+        for c in mock_upsert.call_args_list
+    )
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
 @patch("bot.conversation.storage.upsert_lead")
 @patch("bot.conversation.extraction.extract_lead_data")
 @patch("bot.conversation.config.llm.chat.completions.create")
