@@ -2,7 +2,7 @@
 
 Bot de conversación en Telegram para **Estudio Sinergia**. Recibe actualizaciones vía webhook (`POST /webhook`), procesa el mensaje en segundo plano con FastAPI, usa OpenAI para la conversación y la extracción de datos, persiste historial y leads en **Google Sheets**, y puede cerrar la conversación enviando la URL de **Calendly**.
 
-Flujo resumido: Telegram → tu servidor público en `/webhook` → orquestación → Sheets y respuesta al usuario (con un pequeño delay configurable en código).
+Flujo resumido: Telegram → tu servidor público en `/webhook` → orquestación → Sheets y respuesta al usuario (delay post-LLM, typing y acumulación de mensajes opcionales vía `.env`; ver tabla).
 
 ## Requisitos previos
 
@@ -62,8 +62,15 @@ python main.py
 | `CONVERSATION_HISTORY_MAX_MESSAGES` | No | Máx. turnos enviados al LLM; `0` = sin límite | `0` |
 | `LOG_LEVEL` | No | Nivel de logging (`DEBUG`, `INFO`, etc.) | `INFO` |
 | `PORT` | No | Puerto HTTP del servidor | `8000` |
+| `TELEGRAM_TYPING_ENABLED` | No | `true`/`false`: indicador «escribiendo…» durante el LLM y hasta enviar | `false` |
+| `TYPING_RENEW_INTERVAL_SECONDS` | No | Renovar `sendChatAction(typing)` cada N s (≥ 1) | `4` |
+| `MESSAGE_DEBOUNCE_SECONDS` | No | Segundos de silencio antes del LLM; `0` = un mensaje = un turno | `0` |
+| `MESSAGE_DEBOUNCE_JOIN` | No | Separador al fusionar textos (puedes usar `\n\n` en el valor) | salto doble |
+| `POST_LLM_DELAY_MS` | No | Espera tras la respuesta del LLM antes de `send_message` (ms) | `1000` |
 
 Una plantilla comentada está en `.env.example`.
+
+**Análisis de ráfagas (intervalos user→user):** con el entorno configurado, `python scripts/analyze_message_intervals.py` imprime métricas útiles para decidir `MESSAGE_DEBOUNCE_SECONDS`.
 
 ### Constantes de negocio (solo en código)
 
@@ -72,7 +79,7 @@ No se configuran por `.env`; están en `bot/config.py` por si necesitas revisarl
 - **Zona horaria del negocio**: Colombia (UTC−5, sin DST).
 - **Horario de silencio**: 22:00–07:00 (hora Colombia): en esa ventana el bot puede responder con el mensaje de ausencia en lugar de la conversación normal.
 - **Límite de mensajes del usuario por conversación**: 30.
-- **Delay antes de enviar la respuesta por Telegram**: 1000 ms.
+- **Delay antes de enviar la respuesta por Telegram**: por defecto 1000 ms (`POST_LLM_DELAY_MS` en `.env`). `RESPONSE_DELAY_MS` en código es alias del mismo valor.
 
 ## Webhook de Telegram
 

@@ -95,6 +95,66 @@ def _parse_post_calendly_farewell_user_messages() -> int:
     return n
 
 
+def _parse_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    v = str(raw).strip().lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off"):
+        return False
+    logger.critical("%s must be a boolean (true/false), got: %r", name, raw)
+    sys.exit(1)
+
+
+def _parse_non_negative_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        n = int(str(raw).strip())
+    except ValueError:
+        logger.critical("%s must be an integer, got: %r", name, raw)
+        sys.exit(1)
+    if n < 0:
+        logger.critical("%s must be >= 0, got: %s", name, n)
+        sys.exit(1)
+    return n
+
+
+def _parse_positive_int(name: str, default: int, *, minimum: int = 1) -> int:
+    n = _parse_non_negative_int(name, default)
+    if n < minimum:
+        logger.critical("%s must be >= %s, got: %s", name, minimum, n)
+        sys.exit(1)
+    return n
+
+
+def _parse_post_llm_delay_ms() -> int:
+    """Delay tras respuesta del LLM antes de send_message (Telegram)."""
+    raw = os.environ.get("POST_LLM_DELAY_MS")
+    if raw is not None and str(raw).strip():
+        try:
+            n = int(str(raw).strip())
+        except ValueError:
+            logger.critical("POST_LLM_DELAY_MS must be an integer, got: %r", raw)
+            sys.exit(1)
+        if n < 0:
+            logger.critical("POST_LLM_DELAY_MS must be >= 0, got: %s", n)
+            sys.exit(1)
+        return n
+    return 1000
+
+
+def _parse_message_debounce_join() -> str:
+    raw = os.environ.get("MESSAGE_DEBOUNCE_JOIN")
+    if raw is None or not str(raw).strip():
+        return "\n\n"
+    # Permitir secuencias escapadas típicas en .env
+    return str(raw).strip().replace("\\n", "\n")
+
+
 # --- Required ---
 TELEGRAM_BOT_TOKEN = _require_str("TELEGRAM_BOT_TOKEN")
 OPENAI_API_KEY = _require_str("OPENAI_API_KEY")
@@ -112,6 +172,15 @@ CONVERSATION_HISTORY_MAX_MESSAGES = _parse_conversation_history_max_messages()
 PORT = _parse_port()
 POST_CALENDLY_FAREWELL_USER_MESSAGES = _parse_post_calendly_farewell_user_messages()
 
+# --- Telegram UX: typing indicator + acumulación de mensajes (webhook) ---
+TELEGRAM_TYPING_ENABLED = _parse_bool("TELEGRAM_TYPING_ENABLED", False)
+TYPING_RENEW_INTERVAL_SECONDS = _parse_positive_int(
+    "TYPING_RENEW_INTERVAL_SECONDS", 4, minimum=1
+)
+MESSAGE_DEBOUNCE_SECONDS = _parse_non_negative_int("MESSAGE_DEBOUNCE_SECONDS", 0)
+MESSAGE_DEBOUNCE_JOIN = _parse_message_debounce_join()
+POST_LLM_DELAY_MS = _parse_post_llm_delay_ms()
+
 # --- OpenAI (default API host; no base_url) ---
 llm = OpenAI(api_key=OPENAI_API_KEY)
 llm_extraction = OpenAI(api_key=OPENAI_API_KEY)
@@ -122,7 +191,8 @@ SILENCE_START_HOUR = 22
 SILENCE_END_HOUR = 7
 
 USER_MESSAGE_LIMIT = 30
-RESPONSE_DELAY_MS = 1000
+# Alias del delay post-LLM (compatibilidad con código/docs que citen RESPONSE_DELAY_MS).
+RESPONSE_DELAY_MS = POST_LLM_DELAY_MS
 
 MSG_SILENCE_ABSENCE = (
     "Hola! En este momento no estoy disponible, pero mañana en la mañana te respondo 😌"
@@ -145,10 +215,14 @@ MSG_FALLBACK_LLM = (
 
 logger.info(
     "Config loaded: LLM_MODEL=%s LLM_EXTRACTION_MODEL=%s EXTRACTION_FREQUENCY=%s "
-    "CONVERSATION_HISTORY_MAX_MESSAGES=%s POST_CALENDLY_FAREWELL_USER_MESSAGES=%s",
+    "CONVERSATION_HISTORY_MAX_MESSAGES=%s POST_CALENDLY_FAREWELL_USER_MESSAGES=%s "
+    "TELEGRAM_TYPING_ENABLED=%s MESSAGE_DEBOUNCE_SECONDS=%s POST_LLM_DELAY_MS=%s",
     LLM_MODEL,
     LLM_EXTRACTION_MODEL,
     EXTRACTION_FREQUENCY,
     CONVERSATION_HISTORY_MAX_MESSAGES,
     POST_CALENDLY_FAREWELL_USER_MESSAGES,
+    TELEGRAM_TYPING_ENABLED,
+    MESSAGE_DEBOUNCE_SECONDS,
+    POST_LLM_DELAY_MS,
 )
