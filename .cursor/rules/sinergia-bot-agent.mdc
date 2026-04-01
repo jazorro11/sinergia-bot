@@ -49,7 +49,7 @@ storage.py → config.py
 - Sin estado en memoria entre peticiones: historial y leads viven en Google Sheets
 - Prompts solo en **`prompts.py`** (`SYSTEM_PROMPT` con placeholder `{calendly_url}`, `EXTRACTION_PROMPT`) — ningún otro módulo arma prompts inline
 - **`storage.upsert_lead`**: merge solo de vacío → valor; nunca sobrescribir un campo ya poblado con `None`
-- Extracción periódica según **`EXTRACTION_FREQUENCY`** (default `1`); **siempre** extracción final al cierre (Calendly en respuesta, 9 campos, límite 30, etc.), independiente del conteo
+- Extracción periódica según **`EXTRACTION_FREQUENCY`** (default `2`); **siempre** extracción final al cierre (Calendly en respuesta, 9 campos, límite 30, etc.), independiente del conteo. Opcional **`CONVERSATION_HISTORY_MAX_MESSAGES`** (`0` = sin límite): recorta turnos enviados al LLM + snapshot del lead en system
 - El MCP de Google Sheets es **solo** para desarrollo/inspección, **nunca** en el código del bot
 
 ## Comportamiento crítico del bot
@@ -74,7 +74,7 @@ storage.py → config.py
 
 ## Variables de entorno (referencia)
 
-Requeridas: `TELEGRAM_BOT_TOKEN`, `OPENAI_API_KEY`, `GOOGLE_SERVICE_ACCOUNT_JSON`, `GOOGLE_SHEET_ID`, `CALENDLY_URL`, `LLM_MODEL`, `LLM_EXTRACTION_MODEL`. Opcionales: `EXTRACTION_FREQUENCY` (default `1`), `LOG_LEVEL` (default `INFO`), `PORT` (default `8000`).
+Requeridas: `TELEGRAM_BOT_TOKEN`, `OPENAI_API_KEY`, `GOOGLE_SERVICE_ACCOUNT_JSON`, `GOOGLE_SHEET_ID`, `CALENDLY_URL`, `LLM_MODEL`, `LLM_EXTRACTION_MODEL`. Opcionales: `EXTRACTION_FREQUENCY` (default `2`), `CONVERSATION_HISTORY_MAX_MESSAGES` (default `0`), `LOG_LEVEL` (default `INFO`), `PORT` (default `8000`).
 
 ## Orden de implementación (plan v2)
 

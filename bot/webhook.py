@@ -13,6 +13,7 @@ from telegram.error import TelegramError
 
 from bot import config
 from bot import conversation
+from bot import storage
 from bot.logger import get_logger
 
 logger = get_logger(__name__)
@@ -96,6 +97,7 @@ async def _process_text_and_reply(
 
     try:
         await asyncio.sleep(config.RESPONSE_DELAY_MS / 1000.0)
+        # Texto plano (sin parse_mode): el modelo no usa Markdown y evitamos errores de parseo en Telegram.
         await telegram_bot.send_message(chat_id=chat_id, text=reply)
     except TelegramError as e:
         logger.error("Error enviando a Telegram: chat_id=%s, error=%s", chat_id, repr(e))
@@ -111,6 +113,7 @@ def _schedule(coro: Coroutine[Any, Any, None]) -> None:
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     await telegram_bot.initialize()
+    storage.validate_sheets_schema()
     try:
         yield
     finally:

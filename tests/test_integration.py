@@ -92,7 +92,7 @@ def test_conversation_full_progression_calendly_close() -> None:
         c: str,
         lead_record: dict[str, Any],
         estado: str | None = None,
-    ) -> None:
+    ) -> bool:
         c = str(c).strip()
         if c not in leads:
             leads[c] = {k: None for k in LEAD_DATA_KEYS}
@@ -107,6 +107,7 @@ def test_conversation_full_progression_calendly_close() -> None:
                 row[k] = str(inc).strip()
         if estado is not None:
             row["estado"] = estado
+        return True
 
     def mark_conversation_closed(c: str) -> None:
         nonlocal mark_closed_count
@@ -119,7 +120,9 @@ def test_conversation_full_progression_calendly_close() -> None:
             return _conv_completion("Entendido, sigamos.")
         return _conv_completion(f"Agenda aquí: {config.CALENDLY_URL}")
 
-    def extract_lead_data(_hist: list[dict[str, Any]], _cid: str | int) -> LeadRecord | None:
+    def extract_lead_data(
+        _hist: list[dict[str, Any]], _cid: str | int, **_kw: Any
+    ) -> LeadRecord | None:
         nonlocal ext_i
         ext_i += 1
         if ext_i <= len(progressive):
@@ -127,6 +130,7 @@ def test_conversation_full_progression_calendly_close() -> None:
         return final_record
 
     with (
+        patch("bot.conversation.config.EXTRACTION_FREQUENCY", 1),
         patch("bot.conversation.storage.get_conversation_history", side_effect=get_conversation_history),
         patch("bot.conversation.storage.get_lead", side_effect=get_lead),
         patch("bot.conversation.storage.save_conversation_turn", side_effect=save_conversation_turn),

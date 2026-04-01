@@ -9,7 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from bot import config
-from bot.conversation import process_message
+from bot.conversation import _remove_dangling_calendly_teasers, process_message
+from bot.prompts import SYSTEM_PROMPT_POST_CALENDLY_FAREWELL
 from bot.extraction import LeadRecord
 from bot.storage import LEADS_HEADERS, upsert_lead
 
@@ -87,13 +88,214 @@ def test_calendly_in_assistant_response_closes_once(
     mock_llm.return_value = _conv_completion(
         f"Listo, agenda aquí: {config.CALENDLY_URL}"
     )
-    mock_extract.return_value = LeadRecord(nombre="N")
+    mock_extract.return_value = LeadRecord(
+        nombre="N", ciudad="Bogotá", area_aprox="80"
+    )
+    mock_upsert.return_value = True
     out = process_message(42, 7, "quiero agendar", 999, False)
     assert config.CALENDLY_URL in out
     mock_extract.assert_called_once()
     mock_upsert.assert_called_once()
     assert mock_upsert.call_args.kwargs["estado"] == "calendly_enviado"
     mock_mark_closed.assert_called_once()
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.storage.mark_conversation_closed")
+@patch("bot.conversation.storage.upsert_lead")
+@patch("bot.conversation.extraction.extract_lead_data")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_calendly_blocked_when_minimum_fields_missing(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_llm: MagicMock,
+    mock_extract: MagicMock,
+    mock_upsert: MagicMock,
+    mock_mark_closed: MagicMock,
+    _save: MagicMock,
+) -> None:
+    mock_get_lead.return_value = None
+    mock_get_history.return_value = []
+    mock_llm.return_value = _conv_completion(
+        f"Listo: {config.CALENDLY_URL}"
+    )
+    mock_extract.return_value = LeadRecord(nombre="SoloNombre")
+    out = process_message(1, 1, "agendar ya", 1, False)
+    assert config.CALENDLY_URL not in out
+    mock_mark_closed.assert_not_called()
+    assert not any(
+        c.kwargs.get("estado") == "calendly_enviado"
+        for c in mock_upsert.call_args_list
+    )
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.storage.mark_conversation_closed")
+@patch("bot.conversation.storage.upsert_lead")
+@patch("bot.conversation.extraction.extract_lead_data")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_calendly_blocked_strips_markdown_link_without_empty_brackets(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_llm: MagicMock,
+    mock_extract: MagicMock,
+    mock_upsert: MagicMock,
+    mock_mark_closed: MagicMock,
+    _save: MagicMock,
+) -> None:
+    """Si el LLM usa [url](url) y faltan mínimos, no debe quedar []() al quitar Calendly."""
+    u = config.CALENDLY_URL
+    mock_get_lead.return_value = None
+    mock_get_history.return_value = []
+    mock_llm.return_value = _conv_completion(
+        f"Te dejo el enlace: [{u}]({u})"
+    )
+    mock_extract.return_value = LeadRecord(nombre="SoloNombre")
+    out = process_message(1, 1, "agendar ya", 1, False)
+    assert config.CALENDLY_URL not in out
+    assert "[]()" not in out
+    assert "[] (" not in out
+    mock_mark_closed.assert_not_called()
+    assert not any(
+        c.kwargs.get("estado") == "calendly_enviado"
+        for c in mock_upsert.call_args_list
+    )
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.storage.mark_conversation_closed")
+@patch("bot.conversation.storage.upsert_lead")
+@patch("bot.conversation.extraction.extract_lead_data")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_calendly_blocked_removes_agenda_aca_without_url(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_llm: MagicMock,
+    mock_extract: MagicMock,
+    mock_upsert: MagicMock,
+    mock_mark_closed: MagicMock,
+    _save: MagicMock,
+) -> None:
+    """No debe quedar 'Cuando quieras agenda acá:' si el enlace está bloqueado por mínimos."""
+    u = config.CALENDLY_URL
+    mock_get_lead.return_value = None
+    mock_get_history.return_value = []
+    mock_llm.return_value = _conv_completion(
+        f"Sí, ofrecemos diseño personalizado con la línea plus. "
+        f"¿Te gustaría agendar una videollamada? Cuando quieras agenda acá:\n\n[{u}]({u})"
+    )
+    mock_extract.return_value = LeadRecord(nombre="SoloNombre")
+    out = process_message(1, 1, "hola", 1, False)
+    assert config.CALENDLY_URL not in out
+    assert "agenda acá" not in out.lower()
+    assert "cuando quieras" not in out.lower()
+    assert "por favor" in out.lower()
+    mock_mark_closed.assert_not_called()
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.storage.mark_conversation_closed")
+@patch("bot.conversation.storage.upsert_lead")
+@patch("bot.conversation.extraction.extract_lead_data")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_calendly_blocked_removes_a_traves_enlace_without_url(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_llm: MagicMock,
+    mock_extract: MagicMock,
+    mock_upsert: MagicMock,
+    mock_mark_closed: MagicMock,
+    _save: MagicMock,
+) -> None:
+    """Sin mínimos, no debe quedar 'a través de este enlace:' ni 'agendar una llamada aquí:'."""
+    u = config.CALENDLY_URL
+    mock_get_lead.return_value = None
+    mock_get_history.return_value = []
+    mock_llm.return_value = _conv_completion(
+        f"Genial, me alegra que te interese. Puedes agendar una videollamada en el momento "
+        f"que mejor te convenga a través de este enlace: {u}\n\n"
+        f"Para pasarte el enlace necesito tu nombre por favor, ¿me lo compartes? Gracias"
+    )
+    mock_extract.return_value = LeadRecord(ciudad="Bogotá", area_aprox="192")
+    out = process_message(1, 1, "sí agendar", 1, False)
+    assert config.CALENDLY_URL not in out
+    assert "a través de" not in out.lower()
+    mock_mark_closed.assert_not_called()
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+@patch("bot.conversation.config.llm.chat.completions.create")
+def test_conversational_llm_respects_history_window(
+    mock_llm: MagicMock,
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    _save: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("bot.conversation.config.CONVERSATION_HISTORY_MAX_MESSAGES", 4)
+    mock_get_lead.return_value = None
+    long_hist = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": str(i)}
+        for i in range(20)
+    ]
+    mock_get_history.return_value = long_hist
+    mock_llm.return_value = _conv_completion("ok")
+    process_message(1, 1, "nuevo", 1, False)
+    msgs = mock_llm.call_args.kwargs["messages"]
+    assert msgs[0]["role"] == "system"
+    assert len(msgs) == 6
+    assert [m["content"] for m in msgs[1:-1]] == ["16", "17", "18", "19"]
+    assert msgs[-1] == {"role": "user", "content": "nuevo"}
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_post_calendly_farewell_sends_trimmed_history(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_llm: MagicMock,
+    _save: MagicMock,
+) -> None:
+    filler = [{"role": "user", "content": "old"}, {"role": "assistant", "content": "viejo"}] * 8
+    mock_get_lead.return_value = {"estado": "calendly_enviado", "chat_id": "1"}
+    mock_get_history.return_value = [
+        *filler,
+        {"role": "user", "content": "agendar"},
+        {"role": "assistant", "content": f"Link {config.CALENDLY_URL}"},
+    ]
+    mock_llm.return_value = _conv_completion("Hasta luego")
+    process_message(1, 1, "gracias", 100, False)
+    msgs = mock_llm.call_args.kwargs["messages"]
+    assert len(msgs) == 3
+    assert config.CALENDLY_URL in msgs[1]["content"]
+    assert msgs[2] == {"role": "user", "content": "gracias"}
+
+
+def test_remove_dangling_calendly_teasers_strips_known_tails() -> None:
+    assert "agenda" not in _remove_dangling_calendly_teasers(
+        "Diseño plus te puede servir. Cuando quieras agenda acá:"
+    ).lower()
+    assert not _remove_dangling_calendly_teasers("Solo: Cuando quieras agenda acá:").endswith(
+        ":"
+    )
+    assert "enlace" not in _remove_dangling_calendly_teasers(
+        "Puedes agendar cuando quieras a través de este enlace:"
+    ).lower()
+    assert "aquí" not in _remove_dangling_calendly_teasers(
+        "Cuando quieras, puedes agendar una llamada aquí:"
+    ).lower()
 
 
 @patch("bot.conversation.storage.save_conversation_turn")
@@ -145,7 +347,7 @@ def test_upsert_lead_does_not_overwrite_existing_with_none(
     ws = MagicMock()
     ws.get_all_values.return_value = [headers, row]
     mock_worksheet.return_value = ws
-    upsert_lead(
+    assert upsert_lead(
         "7",
         {"nombre": None, "ciudad": "Bogotá"},
         estado=None,
@@ -179,6 +381,119 @@ def test_llm_failure_returns_fallback_and_logs_error(
     out = process_message(1, 1, "hola", 1, False)
     assert out == config.MSG_FALLBACK_LLM
     assert any(r.levelname == "ERROR" for r in caplog.records)
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_post_calendly_farewell_first_user_message_uses_llm(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_llm: MagicMock,
+    _save: MagicMock,
+) -> None:
+    mock_get_lead.return_value = {"estado": "calendly_enviado", "chat_id": "1"}
+    mock_get_history.return_value = [
+        {"role": "user", "content": "quiero agendar"},
+        {"role": "assistant", "content": f"Aquí: {config.CALENDLY_URL}"},
+    ]
+    mock_llm.return_value = _conv_completion("Un gusto, nos vemos en la llamada")
+    out = process_message(1, 1, "gracias!", 100, False)
+    mock_llm.assert_called_once()
+    assert out == "Un gusto, nos vemos en la llamada"
+    fixed = config.MSG_CLOSED_CALENDLY_OR_LIMIT_TEMPLATE.format(
+        calendly_url=config.CALENDLY_URL
+    )
+    assert out != fixed
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_post_calendly_farewell_third_user_message_returns_fixed_template(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_llm: MagicMock,
+    _save: MagicMock,
+) -> None:
+    mock_get_lead.return_value = {"estado": "calendly_enviado", "chat_id": "1"}
+    mock_get_history.return_value = [
+        {"role": "assistant", "content": f"Link {config.CALENDLY_URL}"},
+        {"role": "user", "content": "gracias"},
+        {"role": "assistant", "content": "de nada"},
+        {"role": "user", "content": "chao"},
+    ]
+    out = process_message(1, 1, "ok", 101, False)
+    mock_llm.assert_not_called()
+    assert out == config.MSG_CLOSED_CALENDLY_OR_LIMIT_TEMPLATE.format(
+        calendly_url=config.CALENDLY_URL
+    )
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_post_calendly_farewell_inferred_close_without_lead_row(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_llm: MagicMock,
+    _save: MagicMock,
+) -> None:
+    mock_get_lead.return_value = None
+    mock_get_history.return_value = [
+        {"role": "assistant", "content": f"Agenda acá {config.CALENDLY_URL}"},
+    ]
+    mock_llm.return_value = _conv_completion("Perfecto, hablamos pronto")
+    out = process_message(9, 9, "listo gracias", 102, False)
+    mock_llm.assert_called_once()
+    assert out == "Perfecto, hablamos pronto"
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_post_calendly_farewell_when_lead_en_curso_but_history_has_calendly_url(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_llm: MagicMock,
+    _save: MagicMock,
+) -> None:
+    """Si Sheets tiene estado desactualizado pero el último turno ya incluyó Calendly, no reabrir flujo principal."""
+    mock_get_lead.return_value = {"estado": "en_curso", "chat_id": "99", "nombre": "Jesús"}
+    mock_get_history.return_value = [
+        {"role": "user", "content": "hola"},
+        {"role": "assistant", "content": f"Aquí el enlace {config.CALENDLY_URL}"},
+    ]
+    mock_llm.return_value = _conv_completion("De acuerdo, cualquier cosa me escribes")
+    out = process_message(99, 1, "repito el plazo en 11 semanas", 200, False)
+    mock_llm.assert_called_once()
+    msgs = mock_llm.call_args.kwargs["messages"]
+    assert msgs[0]["content"] == SYSTEM_PROMPT_POST_CALENDLY_FAREWELL
+    assert out == "De acuerdo, cualquier cosa me escribes"
+
+
+@patch("bot.conversation.storage.save_conversation_turn")
+@patch("bot.conversation.config.llm.chat.completions.create")
+@patch("bot.conversation.storage.get_conversation_history")
+@patch("bot.conversation.storage.get_lead")
+def test_post_calendly_farewell_limite_alcanzado_first_message_uses_llm(
+    mock_get_lead: MagicMock,
+    mock_get_history: MagicMock,
+    mock_llm: MagicMock,
+    _save: MagicMock,
+) -> None:
+    mock_get_lead.return_value = {"estado": "limite_alcanzado", "chat_id": "2"}
+    mock_get_history.return_value = [
+        {"role": "assistant", "content": f"Enlace {config.CALENDLY_URL}"},
+    ]
+    mock_llm.return_value = _conv_completion("Quedamos atentos")
+    out = process_message(2, 2, "gracias", 103, False)
+    mock_llm.assert_called_once()
+    assert out == "Quedamos atentos"
 
 
 def test_webhook_returns_200_and_schedules_background_task() -> None:

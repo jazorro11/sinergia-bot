@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime
 from typing import Any
 
 from bot import config, extraction, storage
 from bot.logger import get_logger
-from bot.prompts import SYSTEM_PROMPT
+from bot.prompts import SYSTEM_PROMPT, SYSTEM_PROMPT_POST_CALENDLY_FAREWELL
 
 logger = get_logger(__name__)
 
@@ -16,6 +17,23 @@ logger = get_logger(__name__)
 _MSG_USER_LIMIT_FAREWELL = (
     "Llegamos al límite de mensajes en esta conversación. Para agendar con Alejandro usa este enlace: "
     "{calendly_url}. Si no agendas ahora, él se pondrá en contacto contigo pronto."
+)
+
+# Cierre con Calendly: 9 campos completos o los tres mínimos del brief.
+_MIN_CALENDLY_KEYS = ("nombre", "ciudad", "area_aprox")
+_MISSING_MIN_LABELS: dict[str, str] = {
+    "nombre": "tu nombre",
+    "ciudad": "la ciudad o municipio del proyecto",
+    "area_aprox": "el área aproximada en m²",
+}
+_MISSING_MIN_PRONOUN: dict[str, str] = {
+    "nombre": "lo",
+    "ciudad": "la",
+    "area_aprox": "la",
+}
+_MSG_UPSERT_FAILED = (
+    "No pude guardar tus datos en este momento (fallo técnico). "
+    "¿Me escribes de nuevo en unos minutos? Cuando funcione te paso el enlace para agendar."
 )
 
 
@@ -43,6 +61,48 @@ def _history_plus_user(
     return [*history, {"role": "user", "content": text}]
 
 
+def _window_history_for_llm(
+    history: list[dict[str, Any]], max_messages: int
+) -> list[dict[str, Any]]:
+    if max_messages <= 0 or len(history) <= max_messages:
+        return list(history)
+    return list(history[-max_messages:])
+
+
+def _format_lead_snapshot_for_system(existing: dict[str, Any] | None) -> str:
+    if not existing:
+        return ""
+    lines: list[str] = []
+    for k in storage.LEAD_DATA_KEYS:
+        v = existing.get(k)
+        if v is None or str(v).strip() == "":
+            continue
+        lines.append(f"- {k}: {str(v).strip()}")
+    if not lines:
+        return ""
+    return (
+        "Datos ya registrados del cliente (no vuelvas a pedirlos salvo confirmación):\n"
+        + "\n".join(lines)
+    )
+
+
+def _norm_history_messages(
+    history: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    return [
+        {"role": str(m["role"]), "content": str(m["content"])} for m in history
+    ]
+
+
+def _history_for_post_calendly_farewell(
+    history: list[dict[str, Any]], url: str
+) -> list[dict[str, str]]:
+    idx = _index_last_assistant_with_calendly(history, url)
+    if idx is None:
+        return _norm_history_messages(history)
+    return _norm_history_messages(history[idx:])
+
+
 def _lead_row_complete(lead: dict[str, Any]) -> bool:
     for key in storage.LEAD_DATA_KEYS:
         v = lead.get(key)
@@ -63,6 +123,191 @@ def _lead_mapping_from_row(lead: dict[str, Any]) -> dict[str, str | None]:
     return out
 
 
+def _merge_lead_for_gate(
+    existing: dict[str, Any] | None,
+    rec: extraction.LeadRecord | None,
+) -> dict[str, str]:
+    """Unión extracción + fila en Sheets: prioriza valor nuevo de extracción si existe."""
+    merged: dict[str, str] = {}
+    for k in storage.LEAD_DATA_KEYS:
+        from_sheet = ""
+        if existing:
+            v = existing.get(k)
+            if v is not None and str(v).strip():
+                from_sheet = str(v).strip()
+        from_ext = ""
+        if rec is not None:
+            raw = rec.model_dump().get(k)
+            if raw is not None and str(raw).strip():
+                from_ext = str(raw).strip()
+        merged[k] = from_ext or from_sheet
+    return merged
+
+
+def _merged_to_lead_payload(merged: dict[str, str]) -> dict[str, str | None]:
+    return {k: (v if (v := merged.get(k, "").strip()) else None) for k in storage.LEAD_DATA_KEYS}
+
+
+def _can_close_with_calendly(merged: dict[str, str]) -> bool:
+    if all(merged.get(k, "").strip() for k in storage.LEAD_DATA_KEYS):
+        return True
+    return all(merged.get(k, "").strip() for k in _MIN_CALENDLY_KEYS)
+
+
+def _message_ask_missing_minimum(merged: dict[str, str]) -> str:
+    missing = [k for k in _MIN_CALENDLY_KEYS if not merged.get(k, "").strip()]
+    phrases = [_MISSING_MIN_LABELS[k] for k in missing]
+    if not phrases:
+        return (
+            "Para pasarte el enlace de la videollamada me falta un dato, "
+            "¿me lo compartes por favor? Gracias"
+        )
+    if len(phrases) == 1:
+        pr = _MISSING_MIN_PRONOUN[missing[0]]
+        return (
+            f"Para pasarte el enlace necesito {phrases[0]} por favor, "
+            f"¿me {pr} compartes? Gracias"
+        )
+    if len(phrases) == 2:
+        return (
+            f"Para pasarte el enlace me faltan {phrases[0]} y {phrases[1]} por favor, "
+            "¿me los compartes? Gracias"
+        )
+    return (
+        f"Para pasarte el enlace me faltan {phrases[0]}, {phrases[1]} y {phrases[2]} "
+        "por favor, ¿me los compartes? Gracias"
+    )
+
+
+def _strip_calendly_from_text(text: str) -> str:
+    """Quita la URL de Calendly y restos Markdown (evita []() si el LLM usó [url](url))."""
+    esc = re.escape(config.CALENDLY_URL)
+    md_link = re.compile(rf"\[[^\]]*\]\(\s*{esc}\s*\)")
+    t = text
+    while md_link.search(t):
+        t = md_link.sub("", t)
+    t = t.replace(config.CALENDLY_URL, "").strip()
+    t = re.sub(r"\[\s*\]\(\s*\)", "", t)
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    return t
+
+
+# Colas de texto que el LLM añade antes del URL; si el cierre está bloqueado, no debe quedar colgando.
+_CALENDLY_TEASER_TAIL: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\s*cuando quieras agenda acá\s*:?\s*\Z", re.IGNORECASE | re.DOTALL),
+    re.compile(
+        r"\s*te dejo mi enlace para que agendes cuando te quede bien\s*:?\s*\Z",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(r"\s*te dejo (el |mi )?enlace\s*:?\s*\Z", re.IGNORECASE | re.DOTALL),
+    re.compile(r"\s*te paso (el )?enlace\s*:?\s*\Z", re.IGNORECASE | re.DOTALL),
+    re.compile(r"\s*te comparto (el )?enlace\s*:?\s*\Z", re.IGNORECASE | re.DOTALL),
+    re.compile(
+        r"\s*aquí (tienes |está )?(el )?enlace\s*:?\s*\Z", re.IGNORECASE | re.DOTALL
+    ),
+    re.compile(
+        r"\s*este es (el )?enlace\s*:?\s*\Z", re.IGNORECASE | re.DOTALL
+    ),
+    re.compile(
+        r"\s*a través de (este |el )?enlace\s*:?\s*\Z",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"\s*puedes agendar una (videollamada|llamada)[^:]{0,200}:\s*\Z",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(
+        r"\s*agendar (una )?(videollamada|llamada)[^:]{0,200}(aquí|acá)\s*:?\s*\Z",
+        re.IGNORECASE | re.DOTALL,
+    ),
+)
+
+
+def _remove_dangling_calendly_teasers(text: str) -> str:
+    """Evita 'agenda acá:' o 'te dejo el enlace:' sin URL cuando el envío de Calendly está bloqueado."""
+    t = text.strip()
+    while True:
+        prev = t
+        for pat in _CALENDLY_TEASER_TAIL:
+            t = pat.sub("", t).strip()
+        t = re.sub(r"\s*:\s*\Z", "", t).strip()
+        if t == prev:
+            break
+    # Frase intermedia "… a través de este enlace: …" (no solo al final del mensaje).
+    t = re.sub(
+        r"\s*a través de (este |el )?enlace\s*:?\s*",
+        " ",
+        t,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    t = re.sub(
+        r"\s+puedes agendar una (videollamada|llamada)[^:]{0,400}:\s*",
+        " ",
+        t,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    # Cola "… enlace" o "… aquí" sin dos puntos (p. ej. tras quitar solo ":" en bucle anterior)
+    t = re.sub(
+        r"\s+a través de (este |el )?enlace\s*\Z",
+        "",
+        t,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    t = re.sub(
+        r"\s+puedes agendar una (videollamada|llamada)\s*\Z",
+        "",
+        t,
+        flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
+    return t
+
+
+def _history_last_assistant_had_calendly(
+    history: list[dict[str, Any]], url: str
+) -> bool:
+    for m in reversed(history):
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content")
+        return content is not None and url in str(content)
+    return False
+
+
+def _index_last_assistant_with_calendly(
+    history: list[dict[str, Any]], url: str
+) -> int | None:
+    for i in range(len(history) - 1, -1, -1):
+        m = history[i]
+        if m.get("role") != "assistant":
+            continue
+        content = m.get("content")
+        if content is not None and url in str(content):
+            return i
+    return None
+
+
+def _count_user_messages_after_index(history: list[dict[str, Any]], idx: int) -> int:
+    return sum(
+        1
+        for j in range(idx + 1, len(history))
+        if history[j].get("role") == "user"
+    )
+
+
+def _post_calendly_farewell_allowed(
+    history: list[dict[str, Any]], url: str, limit: int
+) -> bool:
+    if limit <= 0:
+        return False
+    cal_idx = _index_last_assistant_with_calendly(history, url)
+    if cal_idx is None:
+        return False
+    users_after = _count_user_messages_after_index(history, cal_idx)
+    effective = users_after + 1
+    return effective <= limit
+
+
 def process_message(
     chat_id: str | int,
     user_id: str | int,
@@ -78,19 +323,14 @@ def process_message(
         logger.info("Silencio nocturno: chat_id=%s", cid)
         return config.MSG_SILENCE_ABSENCE
 
-    lead_closed: dict[str, Any] | None = None
+    existing_lead: dict[str, Any] | None = None
     try:
-        lead_closed = storage.get_lead(cid)
+        existing_lead = storage.get_lead(cid)
     except Exception:
         logger.exception("Error get_lead (asumiendo en_curso): chat_id=%s", cid)
 
-    if lead_closed:
-        est = str(lead_closed.get("estado", "")).strip()
-        if est in ("calendly_enviado", "limite_alcanzado"):
-            logger.info("Conversación cerrada, mensaje fijo: chat_id=%s", cid)
-            return config.MSG_CLOSED_CALENDLY_OR_LIMIT_TEMPLATE.format(
-                calendly_url=config.CALENDLY_URL
-            )
+    if existing_lead:
+        est = str(existing_lead.get("estado", "")).strip()
         if est == "no_agendar":
             logger.info("Conversación cerrada, mensaje fijo: chat_id=%s", cid)
             return config.MSG_CLOSED_NO_AGENDAR
@@ -101,12 +341,63 @@ def process_message(
         logger.exception("Error leyendo historial: chat_id=%s", cid)
         return config.MSG_FALLBACK_SHEETS_HISTORY
 
+    est = str(existing_lead.get("estado", "")).strip() if existing_lead else ""
+    closed_calendly_like = est in (
+        "calendly_enviado",
+        "limite_alcanzado",
+    ) or _history_last_assistant_had_calendly(history, config.CALENDLY_URL)
+
+    if closed_calendly_like:
+        if _post_calendly_farewell_allowed(
+            history,
+            config.CALENDLY_URL,
+            config.POST_CALENDLY_FAREWELL_USER_MESSAGES,
+        ):
+            logger.info("Despedida post-Calendly (LLM): chat_id=%s", cid)
+            hist_fw = _history_for_post_calendly_farewell(history, config.CALENDLY_URL)
+            messages_fw: list[dict[str, str]] = [
+                {"role": "system", "content": SYSTEM_PROMPT_POST_CALENDLY_FAREWELL},
+                *hist_fw,
+                {"role": "user", "content": text},
+            ]
+            try:
+                response = config.llm.chat.completions.create(
+                    model=config.LLM_MODEL,
+                    messages=messages_fw,
+                    temperature=0.7,
+                )
+                raw_fw = response.choices[0].message.content
+                if raw_fw is None or not str(raw_fw).strip():
+                    logger.error("LLM despedida: respuesta vacía chat_id=%s", cid)
+                    assistant_text = config.MSG_FALLBACK_LLM
+                else:
+                    assistant_text = _strip_calendly_from_text(str(raw_fw).strip())
+            except Exception:
+                logger.exception("LLM despedida falló: chat_id=%s", cid)
+                assistant_text = config.MSG_FALLBACK_LLM
+
+            storage.save_conversation_turn(cid, "user", text, timestamp, "cerrada")
+            storage.save_conversation_turn(
+                cid, "assistant", assistant_text, int(time.time()), "cerrada"
+            )
+            return assistant_text
+
+        logger.info("Conversación cerrada, mensaje fijo: chat_id=%s", cid)
+        return config.MSG_CLOSED_CALENDLY_OR_LIMIT_TEMPLATE.format(
+            calendly_url=config.CALENDLY_URL
+        )
+
     user_count_in_sheet = count_user_messages(history)
     if user_count_in_sheet >= config.USER_MESSAGE_LIMIT:
-        final = extraction.extract_lead_data(history, cid)
-        storage.upsert_lead(
+        final = extraction.extract_lead_data(
+            history, cid, merge_from_lead_row=existing_lead
+        )
+        ok_limit = storage.upsert_lead(
             cid, final.model_dump() if final else {}, estado="limite_alcanzado"
         )
+        if not ok_limit:
+            logger.error("Límite: upsert falló, chat_id=%s", cid)
+            return _MSG_UPSERT_FAILED
         storage.mark_conversation_closed(cid)
         logger.warning(
             "Límite alcanzado: chat_id=%s, mensajes=%s",
@@ -115,17 +406,27 @@ def process_message(
         )
         return _MSG_USER_LIMIT_FAREWELL.format(calendly_url=config.CALENDLY_URL)
 
+    hist_llm = _window_history_for_llm(
+        history, config.CONVERSATION_HISTORY_MAX_MESSAGES
+    )
     system_content = SYSTEM_PROMPT.replace("{calendly_url}", config.CALENDLY_URL)
+    snapshot = _format_lead_snapshot_for_system(existing_lead)
+    if snapshot:
+        system_content = f"{system_content}\n\n{snapshot}"
     messages: list[dict[str, str]] = [
         {"role": "system", "content": system_content},
-        *[{"role": str(m["role"]), "content": str(m["content"])} for m in history],
+        *[
+            {"role": str(m["role"]), "content": str(m["content"])}
+            for m in hist_llm
+        ],
         {"role": "user", "content": text},
     ]
     full_history = _history_plus_user(history, text)
 
     logger.debug(
-        "LLM conversacional: chat_id=%s turnos_historial=%s",
+        "LLM conversacional: chat_id=%s turnos_enviados=%s turnos_totales=%s",
         cid,
+        len(hist_llm),
         len(history),
     )
 
@@ -146,22 +447,52 @@ def process_message(
 
     closed_via_calendly_in_response = False
     if config.CALENDLY_URL in assistant_text:
-        rec = extraction.extract_lead_data(full_history, cid)
-        storage.upsert_lead(
-            cid, rec.model_dump() if rec else {}, estado="calendly_enviado"
+        rec_close = extraction.extract_lead_data(
+            full_history, cid, merge_from_lead_row=existing_lead
         )
-        storage.mark_conversation_closed(cid)
-        logger.info("Calendly detectado en respuesta LLM: chat_id=%s", cid)
-        closed_via_calendly_in_response = True
+        merged = _merge_lead_for_gate(existing_lead, rec_close)
+        if not _can_close_with_calendly(merged):
+            stripped = _remove_dangling_calendly_teasers(
+                _strip_calendly_from_text(assistant_text)
+            )
+            ask = _message_ask_missing_minimum(merged)
+            assistant_text = f"{stripped}\n\n{ask}".strip() if stripped else ask
+            logger.info(
+                "Calendly en respuesta bloqueado (faltan mínimos o 9 campos): chat_id=%s",
+                cid,
+            )
+        else:
+            payload = _merged_to_lead_payload(merged)
+            ok_cal = storage.upsert_lead(
+                cid, payload, estado="calendly_enviado"
+            )
+            if ok_cal:
+                storage.mark_conversation_closed(cid)
+                logger.info("Calendly detectado en respuesta LLM: chat_id=%s", cid)
+                closed_via_calendly_in_response = True
+            else:
+                assistant_text = _strip_calendly_from_text(assistant_text)
+                assistant_text = (
+                    f"{assistant_text}\n\n{_MSG_UPSERT_FAILED}".strip()
+                    if assistant_text
+                    else _MSG_UPSERT_FAILED
+                )
+                logger.error(
+                    "Calendly: upsert falló, no se cierra conversación: chat_id=%s", cid
+                )
 
     periodic_extraction_done = False
     if not closed_via_calendly_in_response:
         total_user = count_user_messages(history) + 1
         if should_extract(total_user):
             periodic_extraction_done = True
-            rec_p = extraction.extract_lead_data(full_history, cid)
+            max_m = config.CONVERSATION_HISTORY_MAX_MESSAGES
+            hist_ext = _window_history_for_llm(full_history, max_m)
+            rec_p = extraction.extract_lead_data(
+                hist_ext, cid, merge_from_lead_row=existing_lead
+            )
             if rec_p is not None:
-                storage.upsert_lead(cid, rec_p.model_dump())
+                _ = storage.upsert_lead(cid, rec_p.model_dump())
         else:
             logger.debug(
                 "Extracción periódica no aplica: chat_id=%s user_total=%s frecuencia=%s",
@@ -178,12 +509,17 @@ def process_message(
             logger.exception("Error get_lead post-extracción: chat_id=%s", cid)
             lead_after = None
         if lead_after and _lead_row_complete(lead_after):
-            storage.upsert_lead(
+            ok_complete = storage.upsert_lead(
                 cid, _lead_mapping_from_row(lead_after), estado="calendly_enviado"
             )
-            storage.mark_conversation_closed(cid)
-            logger.info("Calendly enviado: chat_id=%s, campos_completos=9/9", cid)
-            conversation_closed = True
+            if ok_complete:
+                storage.mark_conversation_closed(cid)
+                logger.info("Calendly enviado: chat_id=%s, campos_completos=9/9", cid)
+                conversation_closed = True
+            else:
+                logger.error(
+                    "Cierre 9/9: upsert falló, chat_id=%s", cid
+                )
 
     estado_turno = "cerrada" if conversation_closed else "en_curso"
     storage.save_conversation_turn(cid, "user", text, timestamp, estado_turno)

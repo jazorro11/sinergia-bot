@@ -39,6 +39,15 @@ LEADS_HEADERS = (
     "updated_at",
 )
 
+# Hoja conversaciones: columnas mínimas para append y cierre.
+CONVERSACIONES_REQUIRED_HEADERS = (
+    "chat_id",
+    "role",
+    "content",
+    "timestamp",
+    "estado",
+)
+
 
 class LeadFields(TypedDict, total=False):
     """Nine optional lead fields from extraction; compatible with LeadRecord.model_dump()."""
@@ -205,6 +214,38 @@ def save_conversation_turn(
         )
 
 
+def validate_sheets_schema() -> None:
+    """Registra ERROR si faltan encabezados; no lanza (arranque del servidor)."""
+    for sheet_name, required in (
+        ("leads", LEADS_HEADERS),
+        ("conversaciones", CONVERSACIONES_REQUIRED_HEADERS),
+    ):
+        try:
+            ws = _worksheet(sheet_name)
+            rows = ws.get_all_values()
+            if not rows:
+                logger.error(
+                    "Sheets: hoja %r vacía. Fila 1 debe incluir: %s",
+                    sheet_name,
+                    list(required),
+                )
+                continue
+            headers = [h.strip() for h in rows[0]]
+            col_map = _header_index_map(headers)
+            for h in required:
+                if h not in col_map:
+                    logger.error(
+                        "Sheets: hoja %r falta columna %r. Encabezados actuales: %s",
+                        sheet_name,
+                        h,
+                        headers,
+                    )
+        except Exception:
+            logger.exception(
+                "Sheets: no se pudo validar el esquema de la hoja %r", sheet_name
+            )
+
+
 def get_lead(chat_id: str) -> dict[str, Any] | None:
     cid = _norm_chat_id(chat_id)
     try:
@@ -236,7 +277,8 @@ def upsert_lead(
     chat_id: str,
     lead_record: LeadFields | Mapping[str, str | None],
     estado: str | None = None,
-) -> None:
+) -> bool:
+    """Escribe o fusiona fila en `leads`. Devuelve False si falla (p. ej. hoja mal configurada)."""
     cid = _norm_chat_id(chat_id)
     try:
         ws = _worksheet("leads")
@@ -279,7 +321,7 @@ def upsert_lead(
             logger.info(
                 "Lead actualizado: chat_id=%s, campos_con_valor=%s/9", cid, filled
             )
-            return
+            return True
 
         # Update: solo rellenar celdas vacías con valores nuevos no vacíos; nunca borrar.
         row_values = list(rows[row_idx - 1])
@@ -318,8 +360,10 @@ def upsert_lead(
         }
         filled = _count_lead_fields_filled(merged)
         logger.info("Lead actualizado: chat_id=%s, campos_con_valor=%s/9", cid, filled)
+        return True
     except Exception:
         logger.exception("Error upsert lead: chat_id=%s", cid)
+        return False
 
 
 def mark_conversation_closed(chat_id: str) -> None:

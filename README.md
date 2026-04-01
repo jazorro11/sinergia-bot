@@ -58,7 +58,8 @@ python main.py
 | `CALENDLY_URL` | Sí | URL pública del evento Calendly | `https://calendly.com/...` |
 | `LLM_MODEL` | Sí | Modelo para la conversación | `gpt-4o` |
 | `LLM_EXTRACTION_MODEL` | Sí | Modelo para extracción estructurada | `gpt-4o-mini` |
-| `EXTRACTION_FREQUENCY` | No | Cada cuántos mensajes del usuario se ejecuta la extracción (entero ≥ 1) | `1` |
+| `EXTRACTION_FREQUENCY` | No | Cada cuántos mensajes del usuario se ejecuta la extracción (entero ≥ 1) | `2` |
+| `CONVERSATION_HISTORY_MAX_MESSAGES` | No | Máx. turnos enviados al LLM; `0` = sin límite | `0` |
 | `LOG_LEVEL` | No | Nivel de logging (`DEBUG`, `INFO`, etc.) | `INFO` |
 | `PORT` | No | Puerto HTTP del servidor | `8000` |
 
