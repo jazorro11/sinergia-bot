@@ -44,19 +44,22 @@ def main() -> None:
     if load_dotenv:
         load_dotenv(_ROOT / ".env")
 
-    from bot import storage  # noqa: PLC0415 — tras dotenv
+    from bot.logger import get_logger  # noqa: PLC0415 — tras dotenv
+    from bot import storage  # noqa: PLC0415
+
+    logger = get_logger(__name__)
 
     ws = storage._worksheet("conversaciones")  # noqa: SLF001 — script interno
     rows = ws.get_all_values()
     if not rows:
-        print("Hoja conversaciones vacía.")
+        logger.error("Hoja conversaciones vacía.")
         return
 
     headers = [h.strip() for h in rows[0]]
     col_map = storage._header_index_map(headers)  # noqa: SLF001
     for r in ("chat_id", "role", "timestamp"):
         if r not in col_map:
-            print(f"Falta columna {r!r} en conversaciones.")
+            logger.error("Falta columna %r en conversaciones.", r)
             return
 
     by_chat: dict[str, list[tuple[int, str]]] = defaultdict(list)
@@ -89,26 +92,37 @@ def main() -> None:
 
     n_chats = len(by_chat)
     n_burst = len(chats_with_burst_under_15)
-    print("--- Intervalos entre mensajes user consecutivos (mismo chat_id) ---")
-    print(f"Chats con al menos 2 mensajes user: {n_chats}")
-    print(f"Pares user→user analizados: {len(deltas)}")
+    logger.info("--- Intervalos entre mensajes user consecutivos (mismo chat_id) ---")
+    logger.info("Chats con al menos 2 mensajes user: %s", n_chats)
+    logger.info("Pares user→user analizados: %s", len(deltas))
     if n_chats:
-        print(
-            f"Chats con algún par con Δt < 15 s: {n_burst} "
-            f"({100.0 * n_burst / n_chats:.1f}% de chats con 2+ user)"
+        logger.info(
+            "Chats con algún par con Δt < 15 s: %s (%.1f%% de chats con 2+ user)",
+            n_burst,
+            100.0 * n_burst / n_chats,
         )
     if deltas:
-        print(f"Δt mín / máx (s): {min(deltas):.1f} / {max(deltas):.1f}")
-        print(f"Δt p50 / p90 (s): {statistics.median(deltas):.1f} / {_p90(deltas):.1f}")
+        logger.info("Δt mín / máx (s): %.1f / %.1f", min(deltas), max(deltas))
+        logger.info(
+            "Δt p50 / p90 (s): %.1f / %.1f",
+            statistics.median(deltas),
+            _p90(deltas),
+        )
     else:
-        print("No hay pares consecutivos user→user.")
-    print()
-    print("Si el % de chats con ráfagas < 15 s es bajo, debounce ~10 s aporta poco al agregado.")
-    print()
-    print("--- Piloto / go-no-go (checklist) ---")
-    print("1. Desplegar TELEGRAM_TYPING_ENABLED + MESSAGE_DEBOUNCE_SECONDS según .env.example.")
-    print("2. Recolectar logs [debounce] y [typing] y KPIs definidos en el docstring de este script.")
-    print("3. Go si mejora calidad o bajan respuestas al solo-saludo sin subir tokens agregados.")
+        logger.info("No hay pares consecutivos user→user.")
+    logger.info(
+        "Si el %% de chats con ráfagas < 15 s es bajo, debounce ~10 s aporta poco al agregado."
+    )
+    logger.info("--- Piloto / go-no-go (checklist) ---")
+    logger.info(
+        "1. Desplegar TELEGRAM_TYPING_ENABLED + MESSAGE_DEBOUNCE_SECONDS según .env.example."
+    )
+    logger.info(
+        "2. Recolectar logs [debounce] y [typing] y KPIs definidos en el docstring de este script."
+    )
+    logger.info(
+        "3. Go si mejora calidad o bajan respuestas al solo-saludo sin subir tokens agregados."
+    )
 
 
 def _p90(values: list[float]) -> float:
