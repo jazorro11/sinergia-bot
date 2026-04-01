@@ -1,6 +1,7 @@
 """FastAPI webhook: POST /webhook only.
 
 Edge cases (typing + debounce):
+- Con debounce > 0, sendChatAction(typing) no corre durante la ventana de silencio; solo al procesar en `_process_text_and_reply`.
 - edited_message: no se acumula; se procesa en cuanto llega el update (misma ruta que debounce off).
 - Debounce en memoria por chat_id: requiere una sola instancia del proceso; varias réplicas necesitan store compartido.
 - Fusionar varias burbujas en un turno reduce el conteo de mensajes usuario en Sheets frente a procesarlas
@@ -163,10 +164,6 @@ async def _process_text_and_reply(
 
 
 async def _debounce_wait_and_flush(chat_id: int | str, expected_gen: int) -> None:
-    stop_typing = asyncio.Event()
-    typing_task: asyncio.Task[None] | None = None
-    if config.TELEGRAM_TYPING_ENABLED:
-        typing_task = asyncio.create_task(_typing_keepalive(chat_id, stop_typing))
     try:
         await asyncio.sleep(float(config.MESSAGE_DEBOUNCE_SECONDS))
     except asyncio.CancelledError:
@@ -176,14 +173,6 @@ async def _debounce_wait_and_flush(chat_id: int | str, expected_gen: int) -> Non
             expected_gen,
         )
         raise
-    finally:
-        stop_typing.set()
-        if typing_task:
-            typing_task.cancel()
-            try:
-                await typing_task
-            except asyncio.CancelledError:
-                pass
 
     lock = _debounce_lock(chat_id)
     async with lock:

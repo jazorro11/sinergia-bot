@@ -6,7 +6,7 @@ Matriz manual en Telegram (registrar en el piloto):
 | 1 | 0 | false | 1000 | Baseline |
 | 2 | 0 | true | 1000 | «Escribiendo» durante LLM + delay |
 | 3 | 10 | true | 1500 | Dos mensajes rápidos → una respuesta; un turno user en Sheets |
-| 4 | 10 | true | 0 | Ventana de espera + typing, sin sleep extra |
+| 4 | 10 | true | 0 | Ventana de espera sin typing; typing solo al flush (LLM), sin sleep extra |
 | 5 | 10 | false | 1000 | Acumulación sin indicador |
 """
 
@@ -85,6 +85,37 @@ async def test_debounce_two_messages_separate_when_window_expires() -> None:
         await asyncio.sleep(0.15)
 
     assert calls == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_debounce_does_not_start_typing_during_wait() -> None:
+    typing_calls: list[str] = []
+
+    async def fake_typing(_chat_id: int | str, _stop: asyncio.Event) -> None:
+        typing_calls.append("typing")
+
+    async def fake_process(
+        _chat_id: int | str,
+        _user_id: int | str,
+        _text: str,
+        _timestamp: int,
+        _is_edited: bool,
+    ) -> None:
+        return None
+
+    with (
+        patch.object(webhook.config, "MESSAGE_DEBOUNCE_SECONDS", 0.12),
+        patch.object(webhook.config, "TELEGRAM_TYPING_ENABLED", True),
+        patch.object(webhook.config, "POST_LLM_DELAY_MS", 0),
+        patch.object(webhook, "_typing_keepalive", side_effect=fake_typing),
+        patch.object(webhook, "_process_text_and_reply", side_effect=fake_process),
+    ):
+        await webhook._debounce_enqueue_text(99, 1, "hi", 1)
+        await asyncio.sleep(0.05)
+        assert typing_calls == []
+        await asyncio.sleep(0.2)
+
+    assert typing_calls == []
 
 
 @pytest.mark.asyncio
